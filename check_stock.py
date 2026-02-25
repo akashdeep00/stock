@@ -1,169 +1,127 @@
 """
-JioMart Stock Notifier – GitHub Actions + Webshare Proxy Edition
+JioMart Stock Notifier – requests + Webshare proxy (no browser needed)
+Uses rotating residential proxies to bypass Akamai, much faster than Playwright.
 """
 
 import os
 import smtplib
 import re
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
 PRODUCT_NAME = "Bikaji Bikaner Chowpati Bhelpuri 110g"
 PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhelpuri-110-g/608498429"
 
-GMAIL_SENDER    = os.environ["GMAIL_SENDER"]
-GMAIL_PASSWORD  = os.environ["GMAIL_PASSWORD"]
-NOTIFY_EMAIL    = os.environ["NOTIFY_EMAIL"]
-PROXY_USERNAME  = os.environ["PROXY_USERNAME"]
-PROXY_PASSWORD  = os.environ["PROXY_PASSWORD"]
-PROXY_SERVER    = "p.webshare.io"
-PROXY_PORT      = 80
+GMAIL_SENDER   = os.environ["GMAIL_SENDER"]
+GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
+NOTIFY_EMAIL   = os.environ["NOTIFY_EMAIL"]
+PROXY_USERNAME = os.environ["PROXY_USERNAME"]
+PROXY_PASSWORD = os.environ["PROXY_PASSWORD"]
+
+# Webshare rotating residential proxy
+PROXY_URL = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@p.webshare.io:80"
 # ─────────────────────────────────────────────────────────────────────────────
 
-STEALTH_JS = """
-() => {
-    Object.defineProperty(navigator, 'webdriver',      { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins',        { get: () => [1,2,3,4,5] });
-    Object.defineProperty(navigator, 'languages',      { get: () => ['en-IN','en-US','en'] });
-    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 1 });
-    Object.defineProperty(screen,    'width',          { get: () => 1920 });
-    Object.defineProperty(screen,    'height',         { get: () => 1080 });
-    window.chrome = { runtime: {} };
+SESSION_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "DNT": "1",
+    "Cache-Control": "max-age=0",
 }
-"""
+
+
+def make_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update(SESSION_HEADERS)
+    s.proxies = {"http": PROXY_URL, "https": PROXY_URL}
+    return s
 
 
 def check_stock() -> dict:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            proxy={
-                "server":   f"http://{PROXY_SERVER}:{PROXY_PORT}",
-                "username": PROXY_USERNAME,
-                "password": PROXY_PASSWORD,
-            },
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--window-size=1920,1080",
-            ],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            viewport={"width": 1920, "height": 1080},
-            extra_http_headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-            },
-        )
-        context.add_init_script(STEALTH_JS)
-        page = context.new_page()
+    session = make_session()
 
-        # Set default timeout for all operations
-        page.set_default_timeout(90000)
-
+    # ── Try 1: JSON API with pincode ──────────────────────────────────────────
+    # Extract numeric product ID from URL
+    pid_match = re.search(r'/(\d+)$', PRODUCT_URL)
+    if pid_match:
+        pid = pid_match.group(1)
+        api_url = f"https://www.jiomart.com/catalog/product/get_product_data/{pid}"
         try:
-            print("[BROWSER] Loading JioMart product page via proxy...")
-
-            # Use "commit" (fires as soon as navigation starts) — most reliable with slow proxies
-            page.goto(PRODUCT_URL, wait_until="commit", timeout=90000)
-
-            # Wait for the body to actually have content
-            print("[BROWSER] Waiting for page body...")
-            try:
-                page.wait_for_selector("body", state="attached", timeout=60000)
-                # Give JS time to render
-                page.wait_for_timeout(8000)
-            except PlaywrightTimeout:
-                print("[BROWSER] Body wait timed out, reading whatever loaded...")
-
-            # ── Grab page content safely ──────────────────────────────────
-            try:
-                full_text = page.evaluate("() => document.body.innerText")
-            except Exception:
-                full_text = page.evaluate("() => document.documentElement.innerText")
-
-            print("\n[DEBUG] ── Page text snapshot (first 2000 chars) ──")
-            print(full_text[:2000])
-            print("[DEBUG] ── End snapshot ──\n")
-
-            text_lower = full_text.lower()
-
-            if "access denied" in text_lower:
-                browser.close()
-                return {"in_stock": False, "price": "N/A", "error": "Still blocked — try a different proxy region"}
-
-            # ── Pincode entry ─────────────────────────────────────────────
-            try:
-                pin_input = page.locator(
-                    "input[placeholder*='PIN'], input[placeholder*='pin'], "
-                    "input[placeholder*='Pincode'], #pincode-input, input[name='pincode']"
-                ).first
-                if pin_input.is_visible(timeout=5000):
-                    print(f"[BROWSER] Entering pincode {PINCODE}...")
-                    pin_input.click()
-                    page.wait_for_timeout(500)
-                    pin_input.fill(PINCODE)
-                    page.keyboard.press("Enter")
-                    page.wait_for_timeout(5000)
-                    # Re-read text after pincode update
-                    full_text  = page.evaluate("() => document.body.innerText")
-                    text_lower = full_text.lower()
-                else:
-                    print("[BROWSER] No pincode input visible.")
-            except PlaywrightTimeout:
-                print("[BROWSER] Pincode input timed out.")
-
-            # ── Stock detection ───────────────────────────────────────────
-            out_signals      = ["out of stock", "notify me", "currently unavailable", "sold out"]
-            in_stock_signals = ["add to cart", "buy now", "add to bag"]
-
-            try:
-                btn_visible = page.locator(
-                    "button:has-text('Add to Cart'), button:has-text('ADD TO CART'), "
-                    "button:has-text('Buy Now'), button:has-text('BUY NOW')"
-                ).count() > 0
-            except Exception:
-                btn_visible = False
-
-            is_out   = any(sig in text_lower for sig in out_signals)
-            is_in    = any(sig in text_lower for sig in in_stock_signals) or btn_visible
-            in_stock = is_in and not is_out
-
-            print(f"[BROWSER] Out signals      : {[s for s in out_signals if s in text_lower]}")
-            print(f"[BROWSER] In signals       : {[s for s in in_stock_signals if s in text_lower]}")
-            print(f"[BROWSER] Cart btn visible : {btn_visible}")
-
-            # ── Price extraction ──────────────────────────────────────────
-            price = "check site"
-            price_match = re.search(r'₹\s*([\d,]+)', full_text)
-            if price_match:
-                price = f"₹{price_match.group(1)}"
-
-            browser.close()
-            return {"in_stock": in_stock, "price": price, "error": None}
-
+            print(f"[API] Trying JSON endpoint for product {pid}...")
+            resp = session.get(api_url, params={"pin": PINCODE}, timeout=30)
+            print(f"[API] Status code: {resp.status_code}")
+            if resp.status_code == 200:
+                data = resp.json()
+                print(f"[API] Keys: {list(data.keys())}")
+                in_stock = (
+                    data.get("is_in_stock", False) or
+                    data.get("is_salable", False) or
+                    str(data.get("stock_status", "")).upper() == "IN_STOCK"
+                )
+                price = data.get("special_price") or data.get("price", "check site")
+                return {"in_stock": bool(in_stock), "price": f"₹{price}", "error": None}
         except Exception as e:
-            try:
-                browser.close()
-            except Exception:
-                pass
-            return {"in_stock": False, "price": "N/A", "error": str(e)}
+            print(f"[API] Failed: {e}")
+
+    # ── Try 2: HTML scrape ────────────────────────────────────────────────────
+    print("[HTML] Falling back to page scrape...")
+    try:
+        # First visit homepage to get cookies (makes us look like a real user)
+        print("[HTML] Visiting homepage first for cookies...")
+        session.get("https://www.jiomart.com", timeout=30)
+
+        print(f"[HTML] Fetching product page: {PRODUCT_URL}")
+        resp = session.get(PRODUCT_URL, timeout=30)
+        print(f"[HTML] Status code: {resp.status_code}")
+
+        if resp.status_code == 403:
+            return {"in_stock": False, "price": "N/A", "error": "403 blocked — proxy may need rotation"}
+
+        html      = resp.text
+        text_lower = html.lower()
+
+        print(f"[HTML] Page size: {len(html)} bytes")
+        # Print a snippet to debug
+        snippet_start = text_lower.find("stock")
+        if snippet_start > 0:
+            print(f"[HTML] Stock context: ...{html[max(0,snippet_start-100):snippet_start+200]}...")
+
+        out_signals      = ["out of stock", "notify me", "currently unavailable", "sold out"]
+        in_stock_signals = ["add to cart", "buy now", "add to bag", '"is_in_stock":true', '"is_salable":1']
+
+        is_out   = any(sig in text_lower for sig in out_signals)
+        is_in    = any(sig in text_lower for sig in in_stock_signals)
+        in_stock = is_in and not is_out
+
+        print(f"[HTML] Out signals : {[s for s in out_signals if s in text_lower]}")
+        print(f"[HTML] In signals  : {[s for s in in_stock_signals if s in text_lower]}")
+
+        # Price from JSON embedded in page
+        price = "check site"
+        price_match = re.search(r'"price"\s*:\s*"?([\d.]+)"?', html)
+        if price_match:
+            price = f"₹{price_match.group(1)}"
+
+        return {"in_stock": in_stock, "price": price, "error": None}
+
+    except Exception as e:
+        return {"in_stock": False, "price": "N/A", "error": str(e)}
 
 
 def send_email(price: str):
