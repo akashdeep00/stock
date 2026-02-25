@@ -1,191 +1,131 @@
 """
-JioMart Stock Notifier – Playwright + Webshare Proxy + Network Intercept
-Uses residential proxy to bypass Akamai, then intercepts JioMart's internal
-XHR calls to get real pincode-level stock data.
+JioMart Stock Notifier – Scrapfly Edition
+Scrapfly handles Akamai bypass automatically (97% success rate).
+Free plan: 1,000 credits/month, no credit card needed.
+Sign up: https://scrapfly.io
 """
 
 import os
 import smtplib
 import re
-import json
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
 PRODUCT_NAME = "Bikaji Bikaner Chowpati Bhelpuri 110g"
 PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhelpuri-110-g/608498429"
 
-GMAIL_SENDER    = os.environ["GMAIL_SENDER"]
-GMAIL_PASSWORD  = os.environ["GMAIL_PASSWORD"]
-NOTIFY_EMAIL    = os.environ["NOTIFY_EMAIL"]
-PROXY_USERNAME  = os.environ["PROXY_USERNAME"]
-PROXY_PASSWORD  = os.environ["PROXY_PASSWORD"]
+GMAIL_SENDER      = os.environ["GMAIL_SENDER"]
+GMAIL_PASSWORD    = os.environ["GMAIL_PASSWORD"]
+NOTIFY_EMAIL      = os.environ["NOTIFY_EMAIL"]
+SCRAPFLY_API_KEY  = os.environ["SCRAPFLY_API_KEY"]   # from scrapfly.io dashboard
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def fetch(url: str) -> requests.Response:
+    """Fetch via Scrapfly with Akamai bypass + JS rendering + Indian IP."""
+    params = {
+        "key":             SCRAPFLY_API_KEY,
+        "url":             url,
+        "asp":             "true",      # Anti-Scraping Protection — bypasses Akamai
+        "render_js":       "true",      # Execute JavaScript
+        "country":         "in",        # Indian residential IP
+        "cookies":         f"delivery_pin={PINCODE}; pincode={PINCODE}",
+    }
+    return requests.get("https://api.scrapfly.io/scrape", params=params, timeout=120)
+
+
 def check_stock() -> dict:
-    captured = []
+    pid_match = re.search(r'/(\d+)$', PRODUCT_URL)
+    if not pid_match:
+        return {"in_stock": False, "price": "N/A", "error": "Cannot extract product ID"}
+    pid = pid_match.group(1)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            proxy={
-                "server":   "http://p.webshare.io:3128",
-                "username": PROXY_USERNAME,
-                "password": PROXY_PASSWORD,
-            },
-            args=["--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled"],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            viewport={"width": 1280, "height": 800},
-        )
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
-            "window.chrome = { runtime: {} };"
-        )
-        page = context.new_page()
-
-        # ── Intercept XHR responses ───────────────────────────────────────────
-        def handle_response(response):
-            url = response.url.lower()
-            if any(kw in url for kw in [
-                "get_product_data", "availability", "serviceable",
-                "pincode", "stock", "catalog/product",
-            ]):
-                try:
-                    body = response.json()
-                    print(f"[XHR] {response.url}")
-                    print(f"[XHR] Body: {json.dumps(body)[:600]}")
-                    captured.append(body)
-                except Exception:
-                    pass
-
-        page.on("response", handle_response)
-
-        try:
-            print("[BROWSER] Loading product page via proxy...")
-            page.goto(PRODUCT_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(4000)
-
-            # Check if blocked
-            body_text = page.evaluate("() => document.body?.innerText || ''")
-            if "access denied" in body_text.lower():
-                browser.close()
-                return {"in_stock": False, "price": "N/A",
-                        "error": "Akamai blocked — proxy IP flagged, try rotating"}
-
-            # ── Enter pincode ─────────────────────────────────────────────────
-            pin_entered = False
-            selectors = [
-                "input[placeholder*='PIN' i]",
-                "input[placeholder*='pincode' i]",
-                "input[placeholder*='Enter PIN' i]",
-                ".pincode-input input",
-                "#pincode-input",
-                "input[name='pincode']",
-            ]
-            for sel in selectors:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=2000):
-                        print(f"[BROWSER] Pincode input found: {sel}")
-                        el.click()
-                        page.wait_for_timeout(300)
-                        el.fill(PINCODE)
-                        page.keyboard.press("Enter")
-                        print(f"[BROWSER] Entered {PINCODE}, waiting for XHR...")
-                        page.wait_for_timeout(6000)
-                        pin_entered = True
-                        break
-                except PWTimeout:
-                    continue
-
-            if not pin_entered:
-                # Try clicking the "Deliver to" / pincode section to open the modal
-                print("[BROWSER] Trying to open pincode modal...")
-                for trigger in ["text=Enter PIN", "text=Change", "[class*='pincode']",
-                                 "[class*='deliver']", "text=Deliver to"]:
-                    try:
-                        page.locator(trigger).first.click(timeout=2000)
-                        page.wait_for_timeout(1000)
-                        # Now try inputs again
-                        for sel in selectors:
-                            try:
-                                el = page.locator(sel).first
-                                if el.is_visible(timeout=2000):
-                                    el.fill(PINCODE)
-                                    page.keyboard.press("Enter")
-                                    page.wait_for_timeout(6000)
-                                    pin_entered = True
-                                    break
-                            except PWTimeout:
-                                continue
-                        if pin_entered:
-                            break
-                    except PWTimeout:
-                        continue
-
-            print(f"[BROWSER] Pincode entered: {pin_entered}")
-            print(f"[BROWSER] XHR calls captured: {len(captured)}")
-
-            # ── Parse captured XHR ────────────────────────────────────────────
-            for data in captured:
-                print(f"[XHR PARSE] {data}")
-                # Explicit serviceability check
-                if data.get("pincode_serviceable") is False or \
-                   data.get("serviceable") is False or \
-                   data.get("is_serviceable") is False:
-                    browser.close()
-                    return {"in_stock": False, "price": "N/A", "error": None}
-                if data.get("is_in_stock") is True or data.get("is_salable") is True:
-                    price = data.get("special_price") or data.get("price", "check site")
-                    browser.close()
-                    return {"in_stock": True, "price": f"₹{price}", "error": None}
-                if data.get("is_in_stock") is False or data.get("is_salable") is False:
-                    browser.close()
-                    return {"in_stock": False, "price": "N/A", "error": None}
-
-            # ── Fallback: read visible page text ──────────────────────────────
-            print("[BROWSER] Falling back to page text...")
-            full_text  = page.evaluate("() => document.body?.innerText || ''")
-            text_lower = full_text.lower()
-            print(f"[PAGE TEXT]\n{full_text[:2000]}\n")
-
-            out_signals = [
-                "unavailable at your location",
-                "product not available at the selected pin",
-                "out of stock", "notify me",
-                "currently unavailable", "not serviceable",
-            ]
-            in_signals = ["add to cart", "buy now"]
-
-            is_out = any(s in text_lower for s in out_signals)
-            is_in  = any(s in text_lower for s in in_signals)
-
-            print(f"[TEXT] Out: {[s for s in out_signals if s in text_lower]}")
-            print(f"[TEXT] In : {[s for s in in_signals  if s in text_lower]}")
-
-            browser.close()
-            return {"in_stock": is_in and not is_out, "price": "check site", "error": None}
-
-        except Exception as e:
+    # ── Try 1: Internal JSON API ──────────────────────────────────────────────
+    api_url = f"https://www.jiomart.com/catalog/product/get_product_data/{pid}?pin={PINCODE}"
+    try:
+        print(f"[API] Querying product {pid} for pincode {PINCODE}...")
+        resp = fetch(api_url)
+        print(f"[API] HTTP: {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            # Scrapfly wraps response in a result object
+            content = data.get("result", {}).get("content", "")
+            print(f"[API] Content preview: {content[:300]}")
             try:
-                browser.close()
-            except Exception:
-                pass
-            return {"in_stock": False, "price": "N/A", "error": str(e)}
+                product = __import__("json").loads(content)
+                print(f"[API] Product keys: {list(product.keys())}")
+                serviceable = (
+                    product.get("pincode_serviceable", True) and
+                    product.get("serviceable", True)
+                )
+                in_stock = serviceable and (
+                    product.get("is_in_stock", False) or
+                    product.get("is_salable", False) or
+                    str(product.get("stock_status", "")).upper() == "IN_STOCK"
+                )
+                price = product.get("special_price") or product.get("price", "check site")
+                return {"in_stock": bool(in_stock), "price": f"₹{price}", "error": None}
+            except Exception as e:
+                print(f"[API] JSON parse error: {e}")
+    except Exception as e:
+        print(f"[API] Error: {e}")
+
+    # ── Try 2: HTML page scrape ───────────────────────────────────────────────
+    print("[HTML] Fetching rendered product page via Scrapfly...")
+    try:
+        resp = fetch(PRODUCT_URL)
+        print(f"[HTML] HTTP: {resp.status_code}")
+
+        if resp.status_code != 200:
+            return {"in_stock": False, "price": "N/A", "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+        data    = resp.json()
+        html    = data.get("result", {}).get("content", resp.text)
+        print(f"[HTML] Page size: {len(html)} bytes")
+
+        clean = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
+        lower = clean.lower()
+
+        for kw in [
+            "unavailable at your location",
+            "product not available at the selected pin",
+            "add to cart", "buy now", "out of stock", "notify me",
+        ]:
+            idx = lower.find(kw)
+            if idx >= 0:
+                print(f"[HTML] FOUND '{kw}' → ...{clean[max(0,idx-60):idx+150]}...")
+            else:
+                print(f"[HTML] NOT FOUND: '{kw}'")
+
+        out_signals = [
+            "unavailable at your location",
+            "product not available at the selected pin",
+            "out of stock", "notify me",
+            "currently unavailable", "not serviceable",
+        ]
+        in_signals = ["add to cart", "buy now", '"is_in_stock":true', '"is_salable":1']
+
+        is_out   = any(s in lower for s in out_signals)
+        is_in    = any(s in lower for s in in_signals)
+        in_stock = is_in and not is_out
+
+        print(f"[HTML] Out: {[s for s in out_signals if s in lower]}")
+        print(f"[HTML] In : {[s for s in in_signals if s in lower]}")
+
+        price = "check site"
+        m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', html)
+        if m:
+            price = f"₹{m.group(1)}"
+
+        return {"in_stock": in_stock, "price": price, "error": None}
+
+    except Exception as e:
+        return {"in_stock": False, "price": "N/A", "error": str(e)}
 
 
 def send_email(price: str):
