@@ -24,9 +24,8 @@ jobs:
 
       - name: Run stock checker
         env:
-          GMAIL_SENDER:   ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-          NOTIFY_EMAIL:   ${{ secrets.NOTIFY_EMAIL }}
-          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
-          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+          GMAIL_SENDER:    ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:  ${{ secrets.GMAIL_PASSWORD }}
+          NOTIFY_EMAIL:    ${{ secrets.NOTIFY_EMAIL }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: python check_stock.py
