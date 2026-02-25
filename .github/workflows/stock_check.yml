@@ -8,7 +8,7 @@ name: JioMart Stock Checker
 jobs:
   check-stock:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -20,16 +20,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install playwright
-          playwright install chromium
-          playwright install-deps chromium
+        run: pip install requests
 
       - name: Run stock checker
         env:
-          GMAIL_SENDER:   ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-          NOTIFY_EMAIL:   ${{ secrets.NOTIFY_EMAIL }}
-          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
-          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+          GMAIL_SENDER:     ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
+          NOTIFY_EMAIL:     ${{ secrets.NOTIFY_EMAIL }}
+          SCRAPFLY_API_KEY: ${{ secrets.SCRAPFLY_API_KEY }}
         run: python check_stock.py
