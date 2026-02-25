@@ -63,6 +63,18 @@ def check_stock() -> dict:
         pincode_on_page = PINCODE in lower
         print(f"[CHECK] Pincode {PINCODE} on page: {pincode_on_page}")
 
+        # Print all input elements to find the right pincode selector
+        import re as _re
+        inputs = _re.findall(r'<input[^>]{0,400}>', html, _re.IGNORECASE)
+        print(f"[DEBUG] All input elements found ({len(inputs)}):")
+        for inp in inputs:
+            print(f"  {inp[:200]}")
+
+        # Print "deliver to" section context
+        idx = lower.find("deliver")
+        if idx >= 0:
+            print(f"[DEBUG] Deliver section: ...{clean[max(0,idx-50):idx+500]}...")
+
         for kw in [
             "unavailable at your location",
             "product not available at the selected pin",
