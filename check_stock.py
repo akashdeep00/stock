@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
-PRODUCT_NAME = "Bhelpuri"
+PRODUCT_NAME = "Bikaji Bikaner Chowpati Bhelpuri 110g"
 PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhelpuri-110-g/608498429"
 
 GMAIL_SENDER   = os.environ["GMAIL_SENDER"]
@@ -23,7 +23,6 @@ NOTIFY_EMAIL   = os.environ["NOTIFY_EMAIL"]
 
 
 def check_stock() -> dict:
-    """Use a headless Chromium browser to load the JioMart page with the pincode set."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -38,51 +37,65 @@ def check_stock() -> dict:
         page = context.new_page()
 
         try:
-            # Step 1: Open the product page
-            print(f"[BROWSER] Loading product page...")
-            page.goto(PRODUCT_URL, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
+            print("[BROWSER] Loading product page...")
+            page.goto(PRODUCT_URL, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(5000)  # extra wait for JS to render
 
-            # Step 2: Enter pincode if the pincode input is visible
+            # ── Pincode entry ──────────────────────────────────────────────
             try:
-                pin_input = page.locator("input[placeholder*='PIN'], input[placeholder*='pin'], #pincode-input, input[name='pincode']").first
-                if pin_input.is_visible(timeout=5000):
+                pin_input = page.locator(
+                    "input[placeholder*='PIN'], input[placeholder*='pin'], "
+                    "input[placeholder*='Pincode'], input[placeholder*='pincode'], "
+                    "#pincode-input, input[name='pincode']"
+                ).first
+                if pin_input.is_visible(timeout=4000):
                     print(f"[BROWSER] Entering pincode {PINCODE}...")
                     pin_input.fill(PINCODE)
                     page.keyboard.press("Enter")
-                    page.wait_for_timeout(3000)
+                    page.wait_for_timeout(4000)
                 else:
-                    print("[BROWSER] No pincode input found, checking page as-is...")
+                    print("[BROWSER] No pincode input visible.")
             except PlaywrightTimeout:
-                print("[BROWSER] Pincode input not found, proceeding...")
+                print("[BROWSER] Pincode input timed out.")
 
-            # Step 3: Read the page content
-            page_text = page.inner_text("body").lower()
+            # ── Debug: print full visible text ────────────────────────────
+            full_text = page.inner_text("body")
+            print("\n[DEBUG] ── Page text snapshot (first 2000 chars) ──")
+            print(full_text[:2000])
+            print("[DEBUG] ── End snapshot ──\n")
 
-            # Step 4: Detect stock status
+            text_lower = full_text.lower()
+
+            # ── Stock detection ───────────────────────────────────────────
             out_signals = [
-                "out of stock",
-                "notify me",
-                "currently unavailable",
-                "sold out",
-                "not available",
+                "out of stock", "notify me", "currently unavailable",
+                "sold out", "not available",
             ]
             in_stock_signals = [
-                "add to cart",
-                "buy now",
-                "add to bag",
+                "add to cart", "buy now", "add to bag",
             ]
 
-            is_out = any(sig in page_text for sig in out_signals)
-            is_in  = any(sig in page_text for sig in in_stock_signals)
+            # Also check via button elements directly
+            add_to_cart_btn = page.locator(
+                "button:has-text('Add to Cart'), "
+                "button:has-text('ADD TO CART'), "
+                "button:has-text('Buy Now'), "
+                "button:has-text('BUY NOW')"
+            )
+            btn_visible = add_to_cart_btn.count() > 0
+
+            is_out = any(sig in text_lower for sig in out_signals)
+            is_in  = any(sig in text_lower for sig in in_stock_signals) or btn_visible
+
             in_stock = is_in and not is_out
 
-            print(f"[BROWSER] Out-of-stock signals: {[s for s in out_signals if s in page_text]}")
-            print(f"[BROWSER] In-stock signals    : {[s for s in in_stock_signals if s in page_text]}")
+            print(f"[BROWSER] Out-of-stock signals : {[s for s in out_signals if s in text_lower]}")
+            print(f"[BROWSER] In-stock signals     : {[s for s in in_stock_signals if s in text_lower]}")
+            print(f"[BROWSER] Cart button visible  : {btn_visible}")
 
-            # Step 5: Try to extract price
+            # ── Price extraction ──────────────────────────────────────────
             price = "check site"
-            price_match = re.search(r'₹\s*([\d,]+)', page.inner_text("body"))
+            price_match = re.search(r'₹\s*([\d,]+)', full_text)
             if price_match:
                 price = f"₹{price_match.group(1)}"
 
@@ -95,7 +108,6 @@ def check_stock() -> dict:
 
 
 def send_email(price: str):
-    """Send a formatted HTML email via Gmail SMTP."""
     subject = f"🛒 IN STOCK: {PRODUCT_NAME} – JioMart"
     checked_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
 
