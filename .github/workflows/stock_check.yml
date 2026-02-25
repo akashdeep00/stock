@@ -2,14 +2,13 @@ name: JioMart Stock Checker
 
 "on":
   schedule:
-    # Every 25 mins, but script self-skips outside 8 AM – 8 PM IST (2:30 AM – 2:30 PM UTC)
-    - cron: "*/20 * * * *"
+    - cron: "*/25 * * * *"
   workflow_dispatch:
 
 jobs:
   check-stock:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -21,12 +20,14 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
 
       - name: Run stock checker
         env:
-          GMAIL_SENDER:    ${{ secrets.GMAIL_SENDER }}
-          GMAIL_PASSWORD:  ${{ secrets.GMAIL_PASSWORD }}
-          NOTIFY_EMAIL:    ${{ secrets.NOTIFY_EMAIL }}
-          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+          GMAIL_SENDER:   ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          NOTIFY_EMAIL:   ${{ secrets.NOTIFY_EMAIL }}
         run: python check_stock.py
