@@ -1,6 +1,5 @@
 """
 JioMart Stock Notifier – GitHub Actions + Webshare Proxy Edition
-Routes through a residential proxy to bypass Akamai block on GitHub IPs.
 """
 
 import os
@@ -19,22 +18,20 @@ PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhel
 GMAIL_SENDER    = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD  = os.environ["GMAIL_PASSWORD"]
 NOTIFY_EMAIL    = os.environ["NOTIFY_EMAIL"]
-PROXY_USERNAME  = os.environ["PROXY_USERNAME"]   # from Webshare dashboard
-PROXY_PASSWORD  = os.environ["PROXY_PASSWORD"]   # from Webshare dashboard
-
-# Webshare rotating proxy endpoint (same for all free accounts)
+PROXY_USERNAME  = os.environ["PROXY_USERNAME"]
+PROXY_PASSWORD  = os.environ["PROXY_PASSWORD"]
 PROXY_SERVER    = "p.webshare.io"
 PROXY_PORT      = 80
 # ─────────────────────────────────────────────────────────────────────────────
 
 STEALTH_JS = """
 () => {
-    Object.defineProperty(navigator, 'webdriver',     { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins',       { get: () => [1,2,3,4,5] });
-    Object.defineProperty(navigator, 'languages',     { get: () => ['en-IN','en-US','en'] });
-    Object.defineProperty(navigator, 'maxTouchPoints',{ get: () => 1 });
-    Object.defineProperty(screen, 'width',            { get: () => 1920 });
-    Object.defineProperty(screen, 'height',           { get: () => 1080 });
+    Object.defineProperty(navigator, 'webdriver',      { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins',        { get: () => [1,2,3,4,5] });
+    Object.defineProperty(navigator, 'languages',      { get: () => ['en-IN','en-US','en'] });
+    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 1 });
+    Object.defineProperty(screen,    'width',          { get: () => 1920 });
+    Object.defineProperty(screen,    'height',         { get: () => 1080 });
     window.chrome = { runtime: {} };
 }
 """
@@ -77,10 +74,39 @@ def check_stock() -> dict:
         context.add_init_script(STEALTH_JS)
         page = context.new_page()
 
+        # Set default timeout for all operations
+        page.set_default_timeout(90000)
+
         try:
             print("[BROWSER] Loading JioMart product page via proxy...")
-            page.goto(PRODUCT_URL, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(5000)
+
+            # Use "commit" (fires as soon as navigation starts) — most reliable with slow proxies
+            page.goto(PRODUCT_URL, wait_until="commit", timeout=90000)
+
+            # Wait for the body to actually have content
+            print("[BROWSER] Waiting for page body...")
+            try:
+                page.wait_for_selector("body", state="attached", timeout=60000)
+                # Give JS time to render
+                page.wait_for_timeout(8000)
+            except PlaywrightTimeout:
+                print("[BROWSER] Body wait timed out, reading whatever loaded...")
+
+            # ── Grab page content safely ──────────────────────────────────
+            try:
+                full_text = page.evaluate("() => document.body.innerText")
+            except Exception:
+                full_text = page.evaluate("() => document.documentElement.innerText")
+
+            print("\n[DEBUG] ── Page text snapshot (first 2000 chars) ──")
+            print(full_text[:2000])
+            print("[DEBUG] ── End snapshot ──\n")
+
+            text_lower = full_text.lower()
+
+            if "access denied" in text_lower:
+                browser.close()
+                return {"in_stock": False, "price": "N/A", "error": "Still blocked — try a different proxy region"}
 
             # ── Pincode entry ─────────────────────────────────────────────
             try:
@@ -88,37 +114,32 @@ def check_stock() -> dict:
                     "input[placeholder*='PIN'], input[placeholder*='pin'], "
                     "input[placeholder*='Pincode'], #pincode-input, input[name='pincode']"
                 ).first
-                if pin_input.is_visible(timeout=4000):
+                if pin_input.is_visible(timeout=5000):
                     print(f"[BROWSER] Entering pincode {PINCODE}...")
                     pin_input.click()
-                    page.wait_for_timeout(300)
+                    page.wait_for_timeout(500)
                     pin_input.fill(PINCODE)
                     page.keyboard.press("Enter")
-                    page.wait_for_timeout(4000)
+                    page.wait_for_timeout(5000)
+                    # Re-read text after pincode update
+                    full_text  = page.evaluate("() => document.body.innerText")
+                    text_lower = full_text.lower()
                 else:
                     print("[BROWSER] No pincode input visible.")
             except PlaywrightTimeout:
                 print("[BROWSER] Pincode input timed out.")
 
-            # ── Debug snapshot ────────────────────────────────────────────
-            full_text = page.inner_text("body")
-            print("\n[DEBUG] ── Page text snapshot (first 2000 chars) ──")
-            print(full_text[:2000])
-            print("[DEBUG] ── End snapshot ──\n")
-            text_lower = full_text.lower()
-
-            if "access denied" in text_lower:
-                browser.close()
-                return {"in_stock": False, "price": "N/A", "error": "Still blocked — check proxy credentials"}
-
             # ── Stock detection ───────────────────────────────────────────
             out_signals      = ["out of stock", "notify me", "currently unavailable", "sold out"]
             in_stock_signals = ["add to cart", "buy now", "add to bag"]
 
-            btn_visible = page.locator(
-                "button:has-text('Add to Cart'), button:has-text('ADD TO CART'), "
-                "button:has-text('Buy Now'), button:has-text('BUY NOW')"
-            ).count() > 0
+            try:
+                btn_visible = page.locator(
+                    "button:has-text('Add to Cart'), button:has-text('ADD TO CART'), "
+                    "button:has-text('Buy Now'), button:has-text('BUY NOW')"
+                ).count() > 0
+            except Exception:
+                btn_visible = False
 
             is_out   = any(sig in text_lower for sig in out_signals)
             is_in    = any(sig in text_lower for sig in in_stock_signals) or btn_visible
@@ -138,14 +159,17 @@ def check_stock() -> dict:
             return {"in_stock": in_stock, "price": price, "error": None}
 
         except Exception as e:
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                pass
             return {"in_stock": False, "price": "N/A", "error": str(e)}
 
 
 def send_email(price: str):
-    subject = f"🛒 IN STOCK: {PRODUCT_NAME} – JioMart"
+    subject    = f"🛒 IN STOCK: {PRODUCT_NAME} – JioMart"
     checked_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
-    html_body = f"""
+    html_body  = f"""
     <html><body style="font-family:Arial,sans-serif;background:#f5f5f5;padding:20px;">
       <div style="max-width:500px;margin:auto;background:white;border-radius:10px;
                   padding:30px;box-shadow:0 2px 10px rgba(0,0,0,0.1);">
