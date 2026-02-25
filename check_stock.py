@@ -1,18 +1,16 @@
 """
-JioMart Stock Notifier – Scrapfly + JS Scenario Edition
-Uses Scrapfly's js_scenario to actually type the pincode into the page,
-triggering JioMart's availability check just like a real user would.
+JioMart Stock Notifier – Scrapfly Python SDK Edition
+Uses correct js_scenario format from Scrapfly docs.
 """
 
 import os
 import smtplib
 import re
-import json
-import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from scrapfly import ScrapeConfig, ScrapflyClient
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
@@ -27,57 +25,47 @@ SCRAPFLY_API_KEY = os.environ["SCRAPFLY_API_KEY"]
 
 
 def check_stock() -> dict:
+    client = ScrapflyClient(key=SCRAPFLY_API_KEY)
 
-    # Scrapfly js_scenario: interact with the page to enter pincode
-    # then wait for JioMart to update availability
-    import base64
-    scenario = [
-        {"wait": 3000},
-        {"click": {"selector": "input[placeholder*='PIN' i]", "ignore_if_not_visible": True}},
-        {"wait": 500},
-        {"fill": {"selector": "input[placeholder*='PIN' i]", "value": PINCODE, "ignore_if_not_visible": True}},
-        {"key_press": {"key": "Enter"}},
-        {"wait": 5000},
-    ]
-    js_scenario = base64.b64encode(json.dumps(scenario).encode()).decode()
-
-    params = {
-        "key":         SCRAPFLY_API_KEY,
-        "url":         PRODUCT_URL,
-        "asp":         "true",
-        "render_js":   "true",
-        "country":     "in",
-        "js_scenario": js_scenario,
-    }
-
-    print(f"[SCRAPFLY] Fetching page with pincode interaction...")
     try:
-        resp = requests.get("https://api.scrapfly.io/scrape", params=params, timeout=120)
-        print(f"[SCRAPFLY] HTTP: {resp.status_code}")
+        print(f"[SCRAPFLY] Fetching page and entering pincode {PINCODE}...")
+        result = client.scrape(ScrapeConfig(
+            url=PRODUCT_URL,
+            asp=True,
+            render_js=True,
+            country="in",
+            js_scenario=[
+                {"wait": 3000},
+                {"click": {"selector": "input[placeholder*='PIN' i]", "ignore_if_not_exists": True}},
+                {"wait": 500},
+                {"fill": {"selector": "input[placeholder*='PIN' i]", "value": PINCODE, "ignore_if_not_exists": True}},
+                {"click": {"selector": "input[placeholder*='PIN' i]", "ignore_if_not_exists": True}},
+                {"wait": 500},
+                {"click": {"selector": "button[class*='apply' i], button[class*='submit' i], .pincode-apply", "ignore_if_not_exists": True}},
+                {"wait": 5000},
+            ],
+            screenshots={"page": "fullpage"},
+        ))
 
-        if resp.status_code != 200:
-            return {"in_stock": False, "price": "N/A", "error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
-
-        data = resp.json()
-        html = data.get("result", {}).get("content", "")
+        html = result.scrape_result["content"]
         print(f"[SCRAPFLY] Page size: {len(html)} bytes")
 
-        # Show screenshot URL if available (great for debugging)
-        screenshot = data.get("result", {}).get("screenshot_url", "")
-        if screenshot:
-            print(f"[SCRAPFLY] Screenshot: {screenshot}")
+        # Print screenshot URL for debugging
+        screenshots = result.scrape_result.get("screenshots", {})
+        for name, url in screenshots.items():
+            print(f"[SCREENSHOT] {name}: {url}")
 
-        # Strip HTML comments
         clean = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
         lower = clean.lower()
 
-        # Debug all key signals
+        # Check if pincode was applied
+        pincode_on_page = PINCODE in lower
+        print(f"[CHECK] Pincode {PINCODE} on page: {pincode_on_page}")
+
         for kw in [
             "unavailable at your location",
             "product not available at the selected pin",
-            "add to cart", "buy now",
-            "out of stock", "notify me",
-            "844505",   # check if pincode was actually applied
+            "add to cart", "buy now", "out of stock", "notify me",
         ]:
             idx = lower.find(kw)
             if idx >= 0:
@@ -91,36 +79,24 @@ def check_stock() -> dict:
             "out of stock", "notify me",
             "currently unavailable", "not serviceable",
         ]
-        in_signals = [
-            "add to cart", "buy now",
-            '"is_in_stock":true', '"is_salable":1',
-        ]
+        in_signals = ["add to cart", "buy now", '"is_in_stock":true', '"is_salable":1']
 
         is_out = any(s in lower for s in out_signals)
         is_in  = any(s in lower for s in in_signals)
 
-        # Check if pincode was actually applied — if "844505" not on page,
-        # the location wasn't set and result is unreliable
-        pincode_applied = PINCODE in lower
-        print(f"[HTML] Pincode {PINCODE} found on page: {pincode_applied}")
-
-        if not pincode_applied:
-            print("[WARN] Pincode not visible on page — location may not have been set!")
-
         print(f"[HTML] Out: {[s for s in out_signals if s in lower]}")
         print(f"[HTML] In : {[s for s in in_signals if s in lower]}")
 
-        # Out always wins
-        in_stock = is_in and not is_out
+        # If pincode not on page, don't trust the result
+        if not pincode_on_page and is_in and not is_out:
+            print("[WARN] Pincode not applied — defaulting to OUT OF STOCK to avoid false alert")
+            return {"in_stock": False, "price": "N/A", "error": None}
 
-        # If pincode wasn't applied and page shows "in stock", don't trust it
-        if not pincode_applied and is_in and not is_out:
-            print("[WARN] Pincode not applied — treating as UNKNOWN, defaulting to OUT OF STOCK to avoid false alerts")
-            in_stock = False
+        in_stock = is_in and not is_out
 
         price = "check site"
         m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', html)
-        if m and float(m.group(1)) > 1:   # filter out bogus ₹1 / ₹5 prices
+        if m and float(m.group(1)) > 5:
             price = f"₹{m.group(1)}"
 
         return {"in_stock": in_stock, "price": price, "error": None}
