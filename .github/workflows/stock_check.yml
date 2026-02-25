@@ -2,9 +2,8 @@ name: JioMart Stock Checker
 
 "on":
   schedule:
-    # Runs every 30 minutes (GitHub Actions minimum is 5 min, but 30 is polite)
     - cron: "*/30 * * * *"
-  workflow_dispatch:   # Also allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   check-stock:
@@ -20,7 +19,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install requests playwright
+          playwright install chromium
+          playwright install-deps chromium
 
       - name: Run stock checker
         env:
