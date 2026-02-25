@@ -1,6 +1,5 @@
 """
-JioMart Stock Notifier – requests + Webshare proxy (no browser needed)
-Uses rotating residential proxies to bypass Akamai, much faster than Playwright.
+JioMart Stock Notifier – GitHub Actions + Webshare Proxy
 """
 
 import os
@@ -19,20 +18,23 @@ PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhel
 GMAIL_SENDER   = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
 NOTIFY_EMAIL   = os.environ["NOTIFY_EMAIL"]
-PROXY_USERNAME = os.environ["PROXY_USERNAME"]
-PROXY_PASSWORD = os.environ["PROXY_PASSWORD"]
+PROXY_USERNAME = os.environ["PROXY_USERNAME"]   # proxy-specific username from Webshare Proxy List
+PROXY_PASSWORD = os.environ["PROXY_PASSWORD"]   # proxy-specific password from Webshare Proxy List
 
-# Webshare rotating residential proxy
-PROXY_URL = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@p.webshare.io:80"
+# Webshare backbone rotating proxy — port 3128 works best for HTTPS tunneling
+PROXY_HOST = "p.webshare.io"
+PROXY_PORT = "3128"
+PROXY_URL  = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+PROXIES    = {"http": PROXY_URL, "https": PROXY_URL}
 # ─────────────────────────────────────────────────────────────────────────────
 
-SESSION_HEADERS = {
+HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/122.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
@@ -41,34 +43,42 @@ SESSION_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
     "Sec-Fetch-User": "?1",
-    "DNT": "1",
-    "Cache-Control": "max-age=0",
 }
 
 
-def make_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(SESSION_HEADERS)
-    s.proxies = {"http": PROXY_URL, "https": PROXY_URL}
-    return s
+def test_proxy() -> bool:
+    """Verify proxy is working by checking our outbound IP."""
+    try:
+        resp = requests.get(
+            "https://ipv4.webshare.io/",
+            proxies=PROXIES,
+            timeout=15,
+        )
+        ip = resp.text.strip()
+        print(f"[PROXY] ✅ Working — outbound IP: {ip}")
+        return True
+    except Exception as e:
+        print(f"[PROXY] ❌ Failed: {e}")
+        return False
 
 
 def check_stock() -> dict:
-    session = make_session()
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.proxies.update(PROXIES)
 
-    # ── Try 1: JSON API with pincode ──────────────────────────────────────────
-    # Extract numeric product ID from URL
+    # ── Try JSON API first ────────────────────────────────────────────────────
     pid_match = re.search(r'/(\d+)$', PRODUCT_URL)
     if pid_match:
         pid = pid_match.group(1)
         api_url = f"https://www.jiomart.com/catalog/product/get_product_data/{pid}"
         try:
-            print(f"[API] Trying JSON endpoint for product {pid}...")
+            print(f"[API] Querying product {pid} for pincode {PINCODE}...")
             resp = session.get(api_url, params={"pin": PINCODE}, timeout=30)
-            print(f"[API] Status code: {resp.status_code}")
+            print(f"[API] Status: {resp.status_code}")
             if resp.status_code == 200:
                 data = resp.json()
-                print(f"[API] Keys: {list(data.keys())}")
+                print(f"[API] Response keys: {list(data.keys())}")
                 in_stock = (
                     data.get("is_in_stock", False) or
                     data.get("is_salable", False) or
@@ -77,46 +87,42 @@ def check_stock() -> dict:
                 price = data.get("special_price") or data.get("price", "check site")
                 return {"in_stock": bool(in_stock), "price": f"₹{price}", "error": None}
         except Exception as e:
-            print(f"[API] Failed: {e}")
+            print(f"[API] Error: {e}")
 
-    # ── Try 2: HTML scrape ────────────────────────────────────────────────────
-    print("[HTML] Falling back to page scrape...")
+    # ── Fallback: scrape HTML ─────────────────────────────────────────────────
+    print("[HTML] Scraping product page...")
     try:
-        # First visit homepage to get cookies (makes us look like a real user)
-        print("[HTML] Visiting homepage first for cookies...")
-        session.get("https://www.jiomart.com", timeout=30)
+        # Get homepage cookies first
+        session.get("https://www.jiomart.com", timeout=20)
 
-        print(f"[HTML] Fetching product page: {PRODUCT_URL}")
         resp = session.get(PRODUCT_URL, timeout=30)
-        print(f"[HTML] Status code: {resp.status_code}")
+        print(f"[HTML] Status: {resp.status_code} | Size: {len(resp.text)} bytes")
 
-        if resp.status_code == 403:
-            return {"in_stock": False, "price": "N/A", "error": "403 blocked — proxy may need rotation"}
+        if resp.status_code != 200:
+            return {"in_stock": False, "price": "N/A", "error": f"HTTP {resp.status_code}"}
 
-        html      = resp.text
-        text_lower = html.lower()
+        text_lower = resp.text.lower()
 
-        print(f"[HTML] Page size: {len(html)} bytes")
-        # Print a snippet to debug
-        snippet_start = text_lower.find("stock")
-        if snippet_start > 0:
-            print(f"[HTML] Stock context: ...{html[max(0,snippet_start-100):snippet_start+200]}...")
+        # Print a small snapshot around key stock terms
+        for keyword in ["add to cart", "out of stock", "notify me", "is_in_stock", "is_salable"]:
+            idx = text_lower.find(keyword)
+            if idx >= 0:
+                print(f"[HTML] Found '{keyword}' → ...{resp.text[max(0,idx-50):idx+100]}...")
 
         out_signals      = ["out of stock", "notify me", "currently unavailable", "sold out"]
-        in_stock_signals = ["add to cart", "buy now", "add to bag", '"is_in_stock":true', '"is_salable":1']
+        in_stock_signals = ["add to cart", "buy now", '"is_in_stock":true', '"is_salable":1']
 
-        is_out   = any(sig in text_lower for sig in out_signals)
-        is_in    = any(sig in text_lower for sig in in_stock_signals)
+        is_out   = any(s in text_lower for s in out_signals)
+        is_in    = any(s in text_lower for s in in_stock_signals)
         in_stock = is_in and not is_out
 
         print(f"[HTML] Out signals : {[s for s in out_signals if s in text_lower]}")
-        print(f"[HTML] In signals  : {[s for s in in_stock_signals if s in text_lower]}")
+        print(f"[HTML] In  signals : {[s for s in in_stock_signals if s in text_lower]}")
 
-        # Price from JSON embedded in page
         price = "check site"
-        price_match = re.search(r'"price"\s*:\s*"?([\d.]+)"?', html)
-        if price_match:
-            price = f"₹{price_match.group(1)}"
+        m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', resp.text)
+        if m:
+            price = f"₹{m.group(1)}"
 
         return {"in_stock": in_stock, "price": price, "error": None}
 
@@ -153,18 +159,25 @@ def send_email(price: str):
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_SENDER, GMAIL_PASSWORD)
         server.sendmail(GMAIL_SENDER, NOTIFY_EMAIL, msg.as_string())
-    print(f"[EMAIL] ✅ Notification sent to {NOTIFY_EMAIL}")
+    print(f"[EMAIL] ✅ Sent to {NOTIFY_EMAIL}")
 
 
 def main():
-    print(f"[INFO] Checking stock for '{PRODUCT_NAME}' at pincode {PINCODE}...")
+    print(f"[INFO] Checking: '{PRODUCT_NAME}' | Pincode: {PINCODE}")
+
+    # Always test proxy first
+    if not test_proxy():
+        print("[ERROR] Proxy not working — check PROXY_USERNAME and PROXY_PASSWORD secrets")
+        return
+
     result = check_stock()
     if result["error"]:
         print(f"[WARN] {result['error']}")
+
     status = "✅ IN STOCK" if result["in_stock"] else "❌ OUT OF STOCK"
     print(f"[INFO] Status: {status} | Price: {result['price']}")
+
     if result["in_stock"]:
-        print("[INFO] Sending email notification...")
         send_email(result["price"])
     else:
         print("[INFO] Not in stock. No email sent.")
