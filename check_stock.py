@@ -30,16 +30,18 @@ def check_stock() -> dict:
 
     # Scrapfly js_scenario: interact with the page to enter pincode
     # then wait for JioMart to update availability
-    js_scenario = json.dumps([
-        {"wait": 3000},
-        # Try to click the pincode input or "Deliver to" section
-        {"click": {"selector": "input[placeholder*='PIN' i], input[placeholder*='pincode' i], [class*='pincode'] input", "ignore_if_not_exists": True}},
-        {"wait": 500},
-        {"fill": {"selector": "input[placeholder*='PIN' i], input[placeholder*='pincode' i], [class*='pincode'] input", "value": PINCODE, "ignore_if_not_exists": True}},
-        {"press": {"selector": "input[placeholder*='PIN' i], input[placeholder*='pincode' i], [class*='pincode'] input", "key": "Enter", "ignore_if_not_exists": True}},
-        # Wait for availability to update
-        {"wait": 5000},
-    ])
+    import base64
+    scenario = {
+        "steps": [
+            {"action": "wait", "value": 3000},
+            {"action": "click", "selector": "input[placeholder*='PIN' i], [class*='pincode'] input", "optional": True},
+            {"action": "wait", "value": 500},
+            {"action": "fill", "selector": "input[placeholder*='PIN' i], [class*='pincode'] input", "value": PINCODE, "optional": True},
+            {"action": "keyboard.press", "key": "Enter"},
+            {"action": "wait", "value": 5000},
+        ]
+    }
+    js_scenario = base64.b64encode(json.dumps(scenario).encode()).decode()
 
     params = {
         "key":         SCRAPFLY_API_KEY,
