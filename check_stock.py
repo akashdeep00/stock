@@ -16,8 +16,8 @@ from zoneinfo import ZoneInfo
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
-PRODUCT_NAME = "onion-1-kg-pack"
-PRODUCT_URL  = "https://www.jiomart.com/p/groceries/onion-1-kg-pack/611163418"
+PRODUCT_NAME = "Bikaji Bikaner Chowpati Bhelpuri 110g"
+PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhelpuri-110-g/608498429"
 
 GMAIL_SENDER     = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD   = os.environ["GMAIL_PASSWORD"]
@@ -29,15 +29,18 @@ SCRAPER_ENDPOINT = "https://api.scraperapi.com"
 
 
 def fetch_via_scraperapi(url: str) -> requests.Response:
-    """Fetch any URL through ScraperAPI which handles all bot detection."""
+    """Fetch URL via ScraperAPI, injecting pincode cookie so JioMart shows
+    correct stock for the configured delivery location."""
     params = {
-        "api_key":       SCRAPER_API_KEY,
-        "url":           url,
-        "country_code":  "in",          # Indian residential IP
-        "render":        "false",        # no JS rendering needed — faster
-        "keep_headers":  "true",
+        "api_key":      SCRAPER_API_KEY,
+        "url":          url,
+        "country_code": "in",
+        "render":       "true",
+        "keep_headers": "true",
+        # Inject delivery pincode cookie — this is how JioMart tracks location
+        "cookies":      f"delivery_pin={PINCODE}; pincode={PINCODE}",
     }
-    resp = requests.get(SCRAPER_ENDPOINT, params=params, timeout=60)
+    resp = requests.get(SCRAPER_ENDPOINT, params=params, timeout=120)
     return resp
 
 
