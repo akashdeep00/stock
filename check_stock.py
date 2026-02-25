@@ -50,10 +50,11 @@ def check_stock() -> dict:
         html = result.scrape_result["content"]
         print(f"[SCRAPFLY] Page size: {len(html)} bytes")
 
-        # Print screenshot URL for debugging
+        # Print screenshot URL for debugging (includes API key for direct access)
         screenshots = result.scrape_result.get("screenshots", {})
-        for name, url in screenshots.items():
-            print(f"[SCREENSHOT] {name}: {url}")
+        for name, data in screenshots.items():
+            url = data.get("url", "") if isinstance(data, dict) else data
+            print(f"[SCREENSHOT] Open this URL: {url}?key={SCRAPFLY_API_KEY}")
 
         clean = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
         lower = clean.lower()
