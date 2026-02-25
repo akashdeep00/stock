@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
-PRODUCT_NAME = "Onion 1 Kg Pack"
+PRODUCT_NAME = "Bhelpuri"
 PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhelpuri-110-g/608498429"
 
 GMAIL_SENDER   = os.environ["GMAIL_SENDER"]
