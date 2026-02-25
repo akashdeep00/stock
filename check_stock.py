@@ -1,14 +1,14 @@
 """
-JioMart Stock Notifier – ScraperAPI Edition
-ScraperAPI handles Akamai/bot bypassing automatically with real residential IPs.
-Free tier: 1000 calls/month — more than enough for 30-min checks.
-Sign up at: https://www.scraperapi.com (no credit card needed)
+JioMart Stock Notifier – ScraperAPI + JS Instruction Edition
+Uses ScraperAPI to interact with the page (type pincode, wait for response)
+before scraping the stock status.
 """
 
 import os
 import smtplib
 import re
 import requests
+import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -16,103 +16,130 @@ from zoneinfo import ZoneInfo
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
-PRODUCT_NAME = "onion-1-kg-pack"
-PRODUCT_URL  = "https://www.jiomart.com/p/groceries/onion-1-kg-pack/611163418"
+PRODUCT_NAME = "Bikaji Bikaner Chowpati Bhelpuri 110g"
+PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhelpuri-110-g/608498429"
 
-GMAIL_SENDER     = os.environ["GMAIL_SENDER"]
-GMAIL_PASSWORD   = os.environ["GMAIL_PASSWORD"]
-NOTIFY_EMAIL     = os.environ["NOTIFY_EMAIL"]
-SCRAPER_API_KEY  = os.environ["SCRAPER_API_KEY"]   # from scraperapi.com dashboard
+GMAIL_SENDER    = os.environ["GMAIL_SENDER"]
+GMAIL_PASSWORD  = os.environ["GMAIL_PASSWORD"]
+NOTIFY_EMAIL    = os.environ["NOTIFY_EMAIL"]
+SCRAPER_API_KEY = os.environ["SCRAPER_API_KEY"]
+
+SCRAPER_ENDPOINT = "https://api.scraperapi.com/structured/html"
 # ─────────────────────────────────────────────────────────────────────────────
-
-SCRAPER_ENDPOINT = "https://api.scraperapi.com"
-
-
-def fetch_via_scraperapi(url: str) -> requests.Response:
-    """Fetch URL via ScraperAPI, injecting pincode cookie so JioMart shows
-    correct stock for the configured delivery location."""
-    params = {
-        "api_key":      SCRAPER_API_KEY,
-        "url":          url,
-        "country_code": "in",
-        "render":       "true",
-        "keep_headers": "true",
-        # Inject delivery pincode cookie — this is how JioMart tracks location
-        "cookies":      f"delivery_pin={PINCODE}; pincode={PINCODE}",
-    }
-    resp = requests.get(SCRAPER_ENDPOINT, params=params, timeout=120)
-    return resp
 
 
 def check_stock() -> dict:
-
-    # ── Try 1: JSON API ───────────────────────────────────────────────────────
     pid_match = re.search(r'/(\d+)$', PRODUCT_URL)
-    if pid_match:
-        pid = pid_match.group(1)
-        api_url = f"https://www.jiomart.com/catalog/product/get_product_data/{pid}?pin={PINCODE}"
-        try:
-            print(f"[API] Fetching product data for {pid} via ScraperAPI...")
-            resp = fetch_via_scraperapi(api_url)
-            print(f"[API] Status: {resp.status_code}")
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    print(f"[API] Keys: {list(data.keys())}")
-                    in_stock = (
-                        data.get("is_in_stock", False) or
-                        data.get("is_salable", False) or
-                        str(data.get("stock_status", "")).upper() == "IN_STOCK"
-                    )
-                    price = data.get("special_price") or data.get("price", "check site")
-                    return {"in_stock": bool(in_stock), "price": f"₹{price}", "error": None}
-                except Exception:
-                    print("[API] Response not JSON, trying HTML fallback...")
-        except Exception as e:
-            print(f"[API] Error: {e}")
+    if not pid_match:
+        return {"in_stock": False, "price": "N/A", "error": "Cannot extract product ID"}
+    pid = pid_match.group(1)
 
-    # ── Try 2: HTML scrape ────────────────────────────────────────────────────
-    print("[HTML] Fetching product page via ScraperAPI...")
+    # ── Approach 1: ScraperAPI with JS instructions to enter pincode ──────────
+    # ScraperAPI supports structured instructions to interact with pages
+    print("[SCRAPER] Fetching page with pincode interaction...")
     try:
-        resp = fetch_via_scraperapi(PRODUCT_URL)
-        print(f"[HTML] Status: {resp.status_code} | Size: {len(resp.text)} bytes")
+        payload = {
+            "api_key":      SCRAPER_API_KEY,
+            "url":          PRODUCT_URL,
+            "country_code": "in",
+            "render":       True,
+            "instructions": [
+                # Wait for page to load
+                {"wait": 3000},
+                # Click the pincode field if it exists
+                {"click": "input[placeholder*='PIN'], input[placeholder*='pincode'], .pincode-input"},
+                {"wait": 500},
+                # Clear and type pincode
+                {"fill": ["input[placeholder*='PIN'], input[placeholder*='pincode'], .pincode-input", PINCODE]},
+                {"wait": 500},
+                {"press": ["input[placeholder*='PIN'], input[placeholder*='pincode'], .pincode-input", "Enter"]},
+                # Wait for availability to update
+                {"wait": 4000},
+            ]
+        }
+        resp = requests.post(
+            "https://api.scraperapi.com/",
+            json=payload,
+            timeout=120
+        )
+        print(f"[SCRAPER] Status: {resp.status_code} | Size: {len(resp.text)} bytes")
 
-        if resp.status_code != 200:
-            return {"in_stock": False, "price": "N/A", "error": f"HTTP {resp.status_code}"}
-
-        text  = resp.text
-        # Strip HTML comments — JioMart leaves "Out of Stock" in commented-out
-        # markup even when the item IS in stock, causing false negatives.
-        text_clean = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
-        lower = text_clean.lower()
-
-        # Debug: show context around key terms
-        for kw in ["add to cart", "out of stock", "notify me", "is_in_stock", "is_salable"]:
-            idx = lower.find(kw)
-            if idx >= 0:
-                print(f"[HTML] '{kw}' → ...{text_clean[max(0,idx-60):idx+120]}...")
-            else:
-                print(f"[HTML] '{kw}' → not found after stripping comments")
-
-        out_signals = ["out of stock", "notify me", "currently unavailable", "sold out"]
-        in_signals  = ["add to cart", "buy now", '"is_in_stock":true', '"is_salable":1']
-
-        is_out   = any(s in lower for s in out_signals)
-        is_in    = any(s in lower for s in in_signals)
-        in_stock = is_in and not is_out
-
-        print(f"[HTML] Out : {[s for s in out_signals if s in lower]}")
-        print(f"[HTML] In  : {[s for s in in_signals  if s in lower]}")
-
-        price = "check site"
-        m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', text)
-        if m:
-            price = f"₹{m.group(1)}"
-
-        return {"in_stock": in_stock, "price": price, "error": None}
-
+        if resp.status_code == 200:
+            result = _parse_html(resp.text)
+            if result is not None:
+                return result
     except Exception as e:
-        return {"in_stock": False, "price": "N/A", "error": str(e)}
+        print(f"[SCRAPER] Error: {e}")
+
+    # ── Approach 2: Simple GET with render (fallback) ─────────────────────────
+    print("[FALLBACK] Simple rendered GET...")
+    try:
+        params = {
+            "api_key":      SCRAPER_API_KEY,
+            "url":          PRODUCT_URL,
+            "country_code": "in",
+            "render":       "true",
+        }
+        resp = requests.get("https://api.scraperapi.com/", params=params, timeout=120)
+        print(f"[FALLBACK] Status: {resp.status_code} | Size: {len(resp.text)} bytes")
+        if resp.status_code == 200:
+            result = _parse_html(resp.text)
+            if result is not None:
+                return result
+    except Exception as e:
+        print(f"[FALLBACK] Error: {e}")
+
+    return {"in_stock": False, "price": "N/A", "error": "All methods failed"}
+
+
+def _parse_html(html: str) -> dict | None:
+    """Parse JioMart HTML to determine stock status."""
+
+    # Strip HTML comments
+    clean = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
+    lower = clean.lower()
+
+    # Debug all relevant keywords
+    for kw in [
+        "unavailable at your location",
+        "product not available at the selected pin",
+        "add to cart", "buy now",
+        "out of stock", "notify me",
+        "serviceable", "is_in_stock", "is_salable",
+    ]:
+        idx = lower.find(kw)
+        if idx >= 0:
+            print(f"[PARSE] FOUND '{kw}' → ...{clean[max(0,idx-60):idx+150]}...")
+        else:
+            print(f"[PARSE] NOT FOUND: '{kw}'")
+
+    out_signals = [
+        "unavailable at your location",
+        "product not available at the selected pin",
+        "out of stock", "notify me",
+        "currently unavailable", "sold out",
+        "not serviceable",
+    ]
+    in_signals = [
+        "add to cart", "buy now",
+        '"is_in_stock":true', '"is_salable":1',
+    ]
+
+    is_out = any(s in lower for s in out_signals)
+    is_in  = any(s in lower for s in in_signals)
+
+    print(f"[PARSE] Out matched: {[s for s in out_signals if s in lower]}")
+    print(f"[PARSE] In  matched: {[s for s in in_signals if s in lower]}")
+
+    # Out always wins
+    in_stock = is_in and not is_out
+
+    price = "check site"
+    m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', html)
+    if m:
+        price = f"₹{m.group(1)}"
+
+    return {"in_stock": in_stock, "price": price, "error": None}
 
 
 def send_email(price: str):
@@ -153,15 +180,18 @@ def main():
     print(f"[INFO] Current IST time: {now.strftime('%d %b %Y, %I:%M %p IST')}")
 
     if not (8 <= now.hour < 19):
-        print("[INFO] Outside 8 AM – 7 PM IST window. Skipping check to save API credits.")
+        print("[INFO] Outside 8 AM – 7 PM IST window. Skipping to save API credits.")
         return
 
     print(f"[INFO] Checking: '{PRODUCT_NAME}' | Pincode: {PINCODE}")
     result = check_stock()
+
     if result["error"]:
         print(f"[WARN] {result['error']}")
+
     status = "✅ IN STOCK" if result["in_stock"] else "❌ OUT OF STOCK"
     print(f"[INFO] Status: {status} | Price: {result['price']}")
+
     if result["in_stock"]:
         send_email(result["price"])
     else:
