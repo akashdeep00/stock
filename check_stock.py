@@ -16,8 +16,8 @@ from zoneinfo import ZoneInfo
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
-PRODUCT_NAME = "Bikaji Bikaner Chowpati Bhelpuri 110g"
-PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhelpuri-110-g/608498429"
+PRODUCT_NAME = "onion-1-kg-pack"
+PRODUCT_URL  = "https://www.jiomart.com/p/groceries/onion-1-kg-pack/611163418"
 
 GMAIL_SENDER     = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD   = os.environ["GMAIL_PASSWORD"]
