@@ -1,6 +1,6 @@
 """
 JioMart Stock Notifier – GitHub Actions Edition
-Uses Playwright (headless browser) to bypass JioMart's bot protection.
+Uses Playwright with stealth mode to bypass Akamai bot protection.
 """
 
 import os
@@ -21,10 +21,56 @@ GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
 NOTIFY_EMAIL   = os.environ["NOTIFY_EMAIL"]
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Stealth JS — patches browser fingerprints that Akamai checks
+STEALTH_JS = """
+() => {
+    // Hide webdriver flag
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    // Fake plugins
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+    });
+
+    // Fake languages
+    Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-IN', 'en-US', 'en'],
+    });
+
+    // Fake chrome object
+    window.chrome = { runtime: {} };
+
+    // Fake permissions
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters)
+    );
+
+    // Remove headless signals
+    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 1 });
+
+    // Fake screen resolution
+    Object.defineProperty(screen, 'width',  { get: () => 1920 });
+    Object.defineProperty(screen, 'height', { get: () => 1080 });
+}
+"""
+
 
 def check_stock() -> dict:
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--disable-dev-shm-usage",
+                "--disable-setuid-sandbox",
+                "--window-size=1920,1080",
+            ],
+        )
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -32,16 +78,38 @@ def check_stock() -> dict:
                 "Chrome/122.0.0.0 Safari/537.36"
             ),
             locale="en-IN",
-            viewport={"width": 1280, "height": 800},
+            timezone_id="Asia/Kolkata",
+            viewport={"width": 1920, "height": 1080},
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "DNT": "1",
+            },
         )
+
+        # Inject stealth scripts before any page load
+        context.add_init_script(STEALTH_JS)
         page = context.new_page()
 
         try:
-            print("[BROWSER] Loading product page...")
-            page.goto(PRODUCT_URL, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(5000)  # extra wait for JS to render
+            # Warm up with Google first (makes traffic pattern look human)
+            print("[BROWSER] Warming up via google.com...")
+            page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2000)
 
-            # ── Pincode entry ──────────────────────────────────────────────
+            # Now navigate to JioMart
+            print("[BROWSER] Loading JioMart product page...")
+            page.goto(PRODUCT_URL, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(5000)
+
+            # ── Pincode entry ─────────────────────────────────────────────
             try:
                 pin_input = page.locator(
                     "input[placeholder*='PIN'], input[placeholder*='pin'], "
@@ -50,6 +118,8 @@ def check_stock() -> dict:
                 ).first
                 if pin_input.is_visible(timeout=4000):
                     print(f"[BROWSER] Entering pincode {PINCODE}...")
+                    pin_input.click()
+                    page.wait_for_timeout(500)
                     pin_input.fill(PINCODE)
                     page.keyboard.press("Enter")
                     page.wait_for_timeout(4000)
@@ -58,7 +128,7 @@ def check_stock() -> dict:
             except PlaywrightTimeout:
                 print("[BROWSER] Pincode input timed out.")
 
-            # ── Debug: print full visible text ────────────────────────────
+            # ── Debug snapshot ────────────────────────────────────────────
             full_text = page.inner_text("body")
             print("\n[DEBUG] ── Page text snapshot (first 2000 chars) ──")
             print(full_text[:2000])
@@ -66,27 +136,22 @@ def check_stock() -> dict:
 
             text_lower = full_text.lower()
 
+            # Bail early if still access denied
+            if "access denied" in text_lower or "reference #" in text_lower:
+                browser.close()
+                return {"in_stock": False, "price": "N/A", "error": "Access denied by Akamai — retrying next run"}
+
             # ── Stock detection ───────────────────────────────────────────
-            out_signals = [
-                "out of stock", "notify me", "currently unavailable",
-                "sold out", "not available",
-            ]
-            in_stock_signals = [
-                "add to cart", "buy now", "add to bag",
-            ]
+            out_signals      = ["out of stock", "notify me", "currently unavailable", "sold out"]
+            in_stock_signals = ["add to cart", "buy now", "add to bag"]
 
-            # Also check via button elements directly
-            add_to_cart_btn = page.locator(
-                "button:has-text('Add to Cart'), "
-                "button:has-text('ADD TO CART'), "
-                "button:has-text('Buy Now'), "
-                "button:has-text('BUY NOW')"
-            )
-            btn_visible = add_to_cart_btn.count() > 0
+            btn_visible = page.locator(
+                "button:has-text('Add to Cart'), button:has-text('ADD TO CART'), "
+                "button:has-text('Buy Now'), button:has-text('BUY NOW')"
+            ).count() > 0
 
-            is_out = any(sig in text_lower for sig in out_signals)
-            is_in  = any(sig in text_lower for sig in in_stock_signals) or btn_visible
-
+            is_out   = any(sig in text_lower for sig in out_signals)
+            is_in    = any(sig in text_lower for sig in in_stock_signals) or btn_visible
             in_stock = is_in and not is_out
 
             print(f"[BROWSER] Out-of-stock signals : {[s for s in out_signals if s in text_lower]}")
@@ -151,7 +216,7 @@ def main():
     result = check_stock()
 
     if result["error"]:
-        print(f"[ERROR] {result['error']}")
+        print(f"[WARN] {result['error']}")
 
     status = "✅ IN STOCK" if result["in_stock"] else "❌ OUT OF STOCK"
     print(f"[INFO] Status: {status} | Price: {result['price']}")
