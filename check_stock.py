@@ -37,15 +37,11 @@ def check_stock() -> dict:
             country="in",
             js_scenario=[
                 {"wait": 3000},
-                {"click": {"selector": "#rel_pincode"}},
-                {"wait": 300},
-                {"fill": {"selector": "#rel_pincode", "value": PINCODE}},
-                {"wait": 300},
-                # Click the Apply/Check button next to pincode field
-                {"click": {"selector": ".pincode-check, .check-pincode, button[class*='pincode'], #pincode_check_btn, [class*='apply-pincode']", "ignore_if_not_exists": True}},
-                # Also try pressing Enter
-                {"evaluate": f"document.querySelector('#rel_pincode').dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', keyCode: 13, bubbles: true}}))"},
-                {"wait": 5000},
+                {"fill": {"selector": "#rel_pincode", "value": PINCODE, "clear": True}},
+                {"execute": {"script": "document.querySelector('#rel_pincode').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', keyCode: 13, bubbles: true})); document.querySelector('#rel_pincode').dispatchEvent(new Event('input', {bubbles: true}));"}},
+                {"click": {"selector": ".jm-btn.primary, button[class*='apply'], .pincode-btn", "ignore_if_not_exists": True}},
+                {"wait_for_navigation": {"timeout": 5000}},
+                {"wait": 3000},
             ],
         ))
 
