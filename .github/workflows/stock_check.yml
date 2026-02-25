@@ -2,7 +2,7 @@ name: JioMart Stock Checker
 
 "on":
   schedule:
-    - cron: "*/20 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -29,4 +29,6 @@ jobs:
           GMAIL_SENDER:   ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
           NOTIFY_EMAIL:   ${{ secrets.NOTIFY_EMAIL }}
+          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
         run: python check_stock.py
