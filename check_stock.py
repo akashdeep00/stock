@@ -1,13 +1,13 @@
 """
-JioMart Stock Notifier – Scrapfly Edition
-Scrapfly handles Akamai bypass automatically (97% success rate).
-Free plan: 1,000 credits/month, no credit card needed.
-Sign up: https://scrapfly.io
+JioMart Stock Notifier – Scrapfly + JS Scenario Edition
+Uses Scrapfly's js_scenario to actually type the pincode into the page,
+triggering JioMart's availability check just like a real user would.
 """
 
 import os
 import smtplib
 import re
+import json
 import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -16,85 +16,68 @@ from zoneinfo import ZoneInfo
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
-PRODUCT_NAME = "onion-1-kg-pack"
-PRODUCT_URL  = "https://www.jiomart.com/p/groceries/onion-1-kg-pack/611163418"
+PRODUCT_NAME = "Bikaji Bikaner Chowpati Bhelpuri 110g"
+PRODUCT_URL  = "https://www.jiomart.com/p/groceries/bikaji-bikaner-chowpati-bhelpuri-110-g/608498429"
 
-GMAIL_SENDER      = os.environ["GMAIL_SENDER"]
-GMAIL_PASSWORD    = os.environ["GMAIL_PASSWORD"]
-NOTIFY_EMAIL      = os.environ["NOTIFY_EMAIL"]
-SCRAPFLY_API_KEY  = os.environ["SCRAPFLY_API_KEY"]   # from scrapfly.io dashboard
+GMAIL_SENDER     = os.environ["GMAIL_SENDER"]
+GMAIL_PASSWORD   = os.environ["GMAIL_PASSWORD"]
+NOTIFY_EMAIL     = os.environ["NOTIFY_EMAIL"]
+SCRAPFLY_API_KEY = os.environ["SCRAPFLY_API_KEY"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def fetch(url: str) -> requests.Response:
-    """Fetch via Scrapfly with Akamai bypass + JS rendering + Indian IP."""
-    params = {
-        "key":             SCRAPFLY_API_KEY,
-        "url":             url,
-        "asp":             "true",      # Anti-Scraping Protection — bypasses Akamai
-        "render_js":       "true",      # Execute JavaScript
-        "country":         "in",        # Indian residential IP
-        "cookies":         f"delivery_pin={PINCODE}; pincode={PINCODE}",
-    }
-    return requests.get("https://api.scrapfly.io/scrape", params=params, timeout=120)
-
-
 def check_stock() -> dict:
-    pid_match = re.search(r'/(\d+)$', PRODUCT_URL)
-    if not pid_match:
-        return {"in_stock": False, "price": "N/A", "error": "Cannot extract product ID"}
-    pid = pid_match.group(1)
 
-    # ── Try 1: Internal JSON API ──────────────────────────────────────────────
-    api_url = f"https://www.jiomart.com/catalog/product/get_product_data/{pid}?pin={PINCODE}"
-    try:
-        print(f"[API] Querying product {pid} for pincode {PINCODE}...")
-        resp = fetch(api_url)
-        print(f"[API] HTTP: {resp.status_code}")
-        if resp.status_code == 200:
-            data = resp.json()
-            # Scrapfly wraps response in a result object
-            content = data.get("result", {}).get("content", "")
-            print(f"[API] Content preview: {content[:300]}")
-            try:
-                product = __import__("json").loads(content)
-                print(f"[API] Product keys: {list(product.keys())}")
-                serviceable = (
-                    product.get("pincode_serviceable", True) and
-                    product.get("serviceable", True)
-                )
-                in_stock = serviceable and (
-                    product.get("is_in_stock", False) or
-                    product.get("is_salable", False) or
-                    str(product.get("stock_status", "")).upper() == "IN_STOCK"
-                )
-                price = product.get("special_price") or product.get("price", "check site")
-                return {"in_stock": bool(in_stock), "price": f"₹{price}", "error": None}
-            except Exception as e:
-                print(f"[API] JSON parse error: {e}")
-    except Exception as e:
-        print(f"[API] Error: {e}")
+    # Scrapfly js_scenario: interact with the page to enter pincode
+    # then wait for JioMart to update availability
+    js_scenario = json.dumps([
+        {"wait": 3000},
+        # Try to click the pincode input or "Deliver to" section
+        {"click": {"selector": "input[placeholder*='PIN' i], input[placeholder*='pincode' i], [class*='pincode'] input", "ignore_if_not_exists": True}},
+        {"wait": 500},
+        {"fill": {"selector": "input[placeholder*='PIN' i], input[placeholder*='pincode' i], [class*='pincode'] input", "value": PINCODE, "ignore_if_not_exists": True}},
+        {"press": {"selector": "input[placeholder*='PIN' i], input[placeholder*='pincode' i], [class*='pincode'] input", "key": "Enter", "ignore_if_not_exists": True}},
+        # Wait for availability to update
+        {"wait": 5000},
+    ])
 
-    # ── Try 2: HTML page scrape ───────────────────────────────────────────────
-    print("[HTML] Fetching rendered product page via Scrapfly...")
+    params = {
+        "key":         SCRAPFLY_API_KEY,
+        "url":         PRODUCT_URL,
+        "asp":         "true",
+        "render_js":   "true",
+        "country":     "in",
+        "js_scenario": js_scenario,
+    }
+
+    print(f"[SCRAPFLY] Fetching page with pincode interaction...")
     try:
-        resp = fetch(PRODUCT_URL)
-        print(f"[HTML] HTTP: {resp.status_code}")
+        resp = requests.get("https://api.scrapfly.io/scrape", params=params, timeout=120)
+        print(f"[SCRAPFLY] HTTP: {resp.status_code}")
 
         if resp.status_code != 200:
-            return {"in_stock": False, "price": "N/A", "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+            return {"in_stock": False, "price": "N/A", "error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
 
-        data    = resp.json()
-        html    = data.get("result", {}).get("content", resp.text)
-        print(f"[HTML] Page size: {len(html)} bytes")
+        data = resp.json()
+        html = data.get("result", {}).get("content", "")
+        print(f"[SCRAPFLY] Page size: {len(html)} bytes")
 
+        # Show screenshot URL if available (great for debugging)
+        screenshot = data.get("result", {}).get("screenshot_url", "")
+        if screenshot:
+            print(f"[SCRAPFLY] Screenshot: {screenshot}")
+
+        # Strip HTML comments
         clean = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
         lower = clean.lower()
 
+        # Debug all key signals
         for kw in [
             "unavailable at your location",
             "product not available at the selected pin",
-            "add to cart", "buy now", "out of stock", "notify me",
+            "add to cart", "buy now",
+            "out of stock", "notify me",
+            "844505",   # check if pincode was actually applied
         ]:
             idx = lower.find(kw)
             if idx >= 0:
@@ -108,18 +91,36 @@ def check_stock() -> dict:
             "out of stock", "notify me",
             "currently unavailable", "not serviceable",
         ]
-        in_signals = ["add to cart", "buy now", '"is_in_stock":true', '"is_salable":1']
+        in_signals = [
+            "add to cart", "buy now",
+            '"is_in_stock":true', '"is_salable":1',
+        ]
 
-        is_out   = any(s in lower for s in out_signals)
-        is_in    = any(s in lower for s in in_signals)
-        in_stock = is_in and not is_out
+        is_out = any(s in lower for s in out_signals)
+        is_in  = any(s in lower for s in in_signals)
+
+        # Check if pincode was actually applied — if "844505" not on page,
+        # the location wasn't set and result is unreliable
+        pincode_applied = PINCODE in lower
+        print(f"[HTML] Pincode {PINCODE} found on page: {pincode_applied}")
+
+        if not pincode_applied:
+            print("[WARN] Pincode not visible on page — location may not have been set!")
 
         print(f"[HTML] Out: {[s for s in out_signals if s in lower]}")
         print(f"[HTML] In : {[s for s in in_signals if s in lower]}")
 
+        # Out always wins
+        in_stock = is_in and not is_out
+
+        # If pincode wasn't applied and page shows "in stock", don't trust it
+        if not pincode_applied and is_in and not is_out:
+            print("[WARN] Pincode not applied — treating as UNKNOWN, defaulting to OUT OF STOCK to avoid false alerts")
+            in_stock = False
+
         price = "check site"
         m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', html)
-        if m:
+        if m and float(m.group(1)) > 1:   # filter out bogus ₹1 / ₹5 prices
             price = f"₹{m.group(1)}"
 
         return {"in_stock": in_stock, "price": price, "error": None}
