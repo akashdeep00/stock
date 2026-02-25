@@ -8,6 +8,7 @@ name: JioMart Stock Checker
 jobs:
   check-stock:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -25,6 +26,7 @@ jobs:
           playwright install-deps chromium
 
       - name: Run stock checker
+        timeout-minutes: 8
         env:
           GMAIL_SENDER:   ${{ secrets.GMAIL_SENDER }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
