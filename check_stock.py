@@ -1,11 +1,11 @@
 """
-JioMart Stock Notifier – Scrapfly Python SDK Edition
-Uses correct js_scenario format from Scrapfly docs.
+JioMart Stock Notifier – Scrapfly + correct pincode selector
 """
 
 import os
 import smtplib
 import re
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -27,8 +27,9 @@ SCRAPFLY_API_KEY = os.environ["SCRAPFLY_API_KEY"]
 def check_stock() -> dict:
     client = ScrapflyClient(key=SCRAPFLY_API_KEY)
 
+    # ── Step 1: Use correct selector #rel_pincode ─────────────────────────────
+    print(f"[SCRAPFLY] Loading page and entering pincode via #rel_pincode...")
     try:
-        print(f"[SCRAPFLY] Fetching page and entering pincode {PINCODE}...")
         result = client.scrape(ScrapeConfig(
             url=PRODUCT_URL,
             asp=True,
@@ -36,79 +37,87 @@ def check_stock() -> dict:
             country="in",
             js_scenario=[
                 {"wait": 3000},
-                {"click": {"selector": "input[placeholder*='PIN' i]", "ignore_if_not_exists": True}},
-                {"wait": 500},
-                {"fill": {"selector": "input[placeholder*='PIN' i]", "value": PINCODE, "ignore_if_not_exists": True}},
-                {"click": {"selector": "input[placeholder*='PIN' i]", "ignore_if_not_exists": True}},
-                {"wait": 500},
-                {"click": {"selector": "button[class*='apply' i], button[class*='submit' i], .pincode-apply", "ignore_if_not_exists": True}},
+                {"click": {"selector": "#rel_pincode"}},
+                {"wait": 300},
+                {"fill": {"selector": "#rel_pincode", "value": PINCODE}},
+                {"wait": 300},
+                # Click the Apply/Check button next to pincode field
+                {"click": {"selector": ".pincode-check, .check-pincode, button[class*='pincode'], #pincode_check_btn, [class*='apply-pincode']", "ignore_if_not_exists": True}},
+                # Also try pressing Enter
+                {"evaluate": f"document.querySelector('#rel_pincode').dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', keyCode: 13, bubbles: true}}))"},
                 {"wait": 5000},
             ],
-            screenshots={"page": "fullpage"},
         ))
 
-        html = result.scrape_result["content"]
-        print(f"[SCRAPFLY] Page size: {len(html)} bytes")
-
-        # Print screenshot URL for debugging (includes API key for direct access)
-        screenshots = result.scrape_result.get("screenshots", {})
-        for name, data in screenshots.items():
-            url = data.get("url", "") if isinstance(data, dict) else data
-            print(f"[SCREENSHOT] Open this URL: {url}?key={SCRAPFLY_API_KEY}")
-
+        html  = result.scrape_result["content"]
         clean = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
         lower = clean.lower()
 
-        # Check if pincode was applied
-        pincode_on_page = PINCODE in lower
-        print(f"[CHECK] Pincode {PINCODE} on page: {pincode_on_page}")
+        print(f"[SCRAPFLY] Page size: {len(html)} bytes")
+        print(f"[CHECK] Pincode on page: {PINCODE in lower}")
 
-        # Print all input elements to find the right pincode selector
-        import re as _re
-        inputs = _re.findall(r'<input[^>]{0,400}>', html, _re.IGNORECASE)
-        print(f"[DEBUG] All input elements found ({len(inputs)}):")
-        for inp in inputs:
-            print(f"  {inp[:200]}")
+        # ── Step 2: Extract the MST API URL from hidden fields and call it ────
+        # JioMart uses /mst/rest/v1/{product_id}/?pincode=X to check availability
+        sku_match = re.search(r'id="sku_val" value="(\d+)"', html)
+        sku = sku_match.group(1) if sku_match else None
+        print(f"[API] SKU found: {sku}")
 
-        # Print "deliver to" section context
-        idx = lower.find("deliver")
-        if idx >= 0:
-            print(f"[DEBUG] Deliver section: ...{clean[max(0,idx-50):idx+500]}...")
+        if sku:
+            mst_url = f"https://www.jiomart.com/mst/rest/v1/{sku}/?pincode={PINCODE}"
+            print(f"[API] Calling MST API: {mst_url}")
+            try:
+                api_result = client.scrape(ScrapeConfig(
+                    url=mst_url,
+                    asp=True,
+                    country="in",
+                ))
+                api_content = api_result.scrape_result["content"]
+                print(f"[API] Response: {api_content[:500]}")
+                try:
+                    data = __import__("json").loads(api_content)
+                    print(f"[API] Keys: {list(data.keys())}")
+                    # Check serviceability
+                    serviceable = data.get("serviceable", data.get("pincode_serviceable", True))
+                    in_stock    = data.get("is_in_stock", data.get("is_salable", False))
+                    if serviceable is False:
+                        return {"in_stock": False, "price": "N/A", "error": None}
+                    if in_stock is not None:
+                        price = data.get("special_price") or data.get("price", "check site")
+                        return {"in_stock": bool(in_stock) and bool(serviceable),
+                                "price": f"₹{price}", "error": None}
+                except Exception as e:
+                    print(f"[API] Parse error: {e}")
+            except Exception as e:
+                print(f"[API] Error: {e}")
 
-        for kw in [
-            "unavailable at your location",
-            "product not available at the selected pin",
-            "add to cart", "buy now", "out of stock", "notify me",
-        ]:
+        # ── Step 3: Fallback — read page text signals ─────────────────────────
+        for kw in ["unavailable at your location",
+                   "product not available at the selected pin",
+                   "add to cart", "out of stock", "notify me"]:
             idx = lower.find(kw)
             if idx >= 0:
-                print(f"[HTML] FOUND '{kw}' → ...{clean[max(0,idx-60):idx+150]}...")
+                print(f"[HTML] FOUND '{kw}' → ...{clean[max(0,idx-40):idx+120]}...")
             else:
                 print(f"[HTML] NOT FOUND: '{kw}'")
 
         out_signals = [
             "unavailable at your location",
             "product not available at the selected pin",
-            "out of stock", "notify me",
-            "currently unavailable", "not serviceable",
+            "out of stock", "notify me", "currently unavailable",
         ]
-        in_signals = ["add to cart", "buy now", '"is_in_stock":true', '"is_salable":1']
+        in_signals = ["add to cart", "buy now"]
 
-        is_out = any(s in lower for s in out_signals)
-        is_in  = any(s in lower for s in in_signals)
-
-        print(f"[HTML] Out: {[s for s in out_signals if s in lower]}")
-        print(f"[HTML] In : {[s for s in in_signals if s in lower]}")
-
-        # If pincode not on page, don't trust the result
-        if not pincode_on_page and is_in and not is_out:
-            print("[WARN] Pincode not applied — defaulting to OUT OF STOCK to avoid false alert")
-            return {"in_stock": False, "price": "N/A", "error": None}
-
+        is_out   = any(s in lower for s in out_signals)
+        is_in    = any(s in lower for s in in_signals)
         in_stock = is_in and not is_out
 
+        # Only trust result if pincode was applied
+        if not (PINCODE in lower) and in_stock:
+            print("[WARN] Pincode not on page — not trusting IN STOCK result")
+            in_stock = False
+
         price = "check site"
-        m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', html)
+        m = re.search(r'id="selling_price_val" value="([\d.]+)"', html)
         if m and float(m.group(1)) > 5:
             price = f"₹{m.group(1)}"
 
