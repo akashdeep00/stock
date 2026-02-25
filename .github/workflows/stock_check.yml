@@ -3,7 +3,7 @@ name: JioMart Stock Checker
 "on":
   schedule:
     # Every 25 mins, but script self-skips outside 8 AM – 8 PM IST (2:30 AM – 2:30 PM UTC)
-    - cron: "*/25 * * * *"
+    - cron: "*/20 * * * *"
   workflow_dispatch:
 
 jobs:
