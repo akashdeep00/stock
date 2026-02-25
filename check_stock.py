@@ -77,13 +77,18 @@ def check_stock() -> dict:
             return {"in_stock": False, "price": "N/A", "error": f"HTTP {resp.status_code}"}
 
         text  = resp.text
-        lower = text.lower()
+        # Strip HTML comments — JioMart leaves "Out of Stock" in commented-out
+        # markup even when the item IS in stock, causing false negatives.
+        text_clean = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+        lower = text_clean.lower()
 
         # Debug: show context around key terms
         for kw in ["add to cart", "out of stock", "notify me", "is_in_stock", "is_salable"]:
             idx = lower.find(kw)
             if idx >= 0:
-                print(f"[HTML] '{kw}' → ...{text[max(0,idx-60):idx+120]}...")
+                print(f"[HTML] '{kw}' → ...{text_clean[max(0,idx-60):idx+120]}...")
+            else:
+                print(f"[HTML] '{kw}' → not found after stripping comments")
 
         out_signals = ["out of stock", "notify me", "currently unavailable", "sold out"]
         in_signals  = ["add to cart", "buy now", '"is_in_stock":true', '"is_salable":1']
