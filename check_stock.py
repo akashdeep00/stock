@@ -12,6 +12,7 @@ import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
@@ -113,7 +114,7 @@ def check_stock() -> dict:
 
 def send_email(price: str):
     subject    = f"🛒 IN STOCK: {PRODUCT_NAME} – JioMart"
-    checked_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    checked_at = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
     html_body  = f"""
     <html><body style="font-family:Arial,sans-serif;background:#f5f5f5;padding:20px;">
       <div style="max-width:500px;margin:auto;background:white;border-radius:10px;
@@ -144,6 +145,14 @@ def send_email(price: str):
 
 
 def main():
+    ist = ZoneInfo("Asia/Kolkata")
+    now = datetime.now(ist)
+    print(f"[INFO] Current IST time: {now.strftime('%d %b %Y, %I:%M %p IST')}")
+
+    if not (8 <= now.hour < 19):
+        print("[INFO] Outside 8 AM – 7 PM IST window. Skipping check to save API credits.")
+        return
+
     print(f"[INFO] Checking: '{PRODUCT_NAME}' | Pincode: {PINCODE}")
     result = check_stock()
     if result["error"]:
