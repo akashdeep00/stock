@@ -1,92 +1,101 @@
 """
 JioMart Stock Notifier – GitHub Actions Edition
-Checks stock for a pincode and sends Gmail alert if available.
+Uses Playwright (headless browser) to bypass JioMart's bot protection.
 """
 
 import os
 import smtplib
-import requests
-import json
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
-# ─── CONFIG (set these as GitHub Secrets) ────────────────────────────────────
-PRODUCT_ID   = "590011678"
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
 PINCODE      = "844505"
 PRODUCT_NAME = "Onion 1 Kg Pack"
 PRODUCT_URL  = "https://www.jiomart.com/p/groceries/onion-1-kg-pack/611163418"
 
-GMAIL_SENDER   = os.environ["GMAIL_SENDER"]    # your Gmail address
-GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]  # Gmail App Password
-NOTIFY_EMAIL   = os.environ["NOTIFY_EMAIL"]    # email to receive alerts (can be same)
+GMAIL_SENDER   = os.environ["GMAIL_SENDER"]
+GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
+NOTIFY_EMAIL   = os.environ["NOTIFY_EMAIL"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def check_stock() -> dict:
-    """Check product availability via JioMart API, with HTML scrape fallback."""
-    url = f"https://www.jiomart.com/catalog/product/get_product_data/{PRODUCT_ID}"
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-IN,en;q=0.9",
-        "Referer": PRODUCT_URL,
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "X-Requested-With": "XMLHttpRequest",
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, params={"pin": PINCODE}, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        print(f"[API] Response: {json.dumps(data, indent=2)[:500]}")
-
-        in_stock = (
-            data.get("is_in_stock", False)
-            or data.get("is_salable", False)
-            or data.get("stock_status", "") == "IN_STOCK"
-        )
-        price = data.get("special_price") or data.get("price", "N/A")
-        return {"in_stock": bool(in_stock), "price": f"₹{price}", "error": None}
-
-    except Exception as api_err:
-        print(f"[API] Failed: {api_err} — trying HTML fallback...")
-        return _fallback_scrape(api_err)
-
-
-def _fallback_scrape(original_error) -> dict:
-    """Scrape the product page to detect out-of-stock signals."""
-    try:
-        headers = {
-            "User-Agent": (
+    """Use a headless Chromium browser to load the JioMart page with the pincode set."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/122.0.0.0 Safari/537.36"
             ),
-            "Accept-Language": "en-IN,en;q=0.9",
-        }
-        resp = requests.get(f"{PRODUCT_URL}?pin={PINCODE}", headers=headers, timeout=15)
-        resp.raise_for_status()
-        html = resp.text.lower()
+            locale="en-IN",
+            viewport={"width": 1280, "height": 800},
+        )
+        page = context.new_page()
 
-        out_signals = ["out of stock", "notify me", "currently unavailable", "sold out"]
-        in_stock = not any(sig in html for sig in out_signals)
+        try:
+            # Step 1: Open the product page
+            print(f"[BROWSER] Loading product page...")
+            page.goto(PRODUCT_URL, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
 
-        # Try to extract price from HTML
-        import re
-        price_match = re.search(r'"price"\s*:\s*"?([\d.]+)"?', html)
-        price = f"₹{price_match.group(1)}" if price_match else "check site"
+            # Step 2: Enter pincode if the pincode input is visible
+            try:
+                pin_input = page.locator("input[placeholder*='PIN'], input[placeholder*='pin'], #pincode-input, input[name='pincode']").first
+                if pin_input.is_visible(timeout=5000):
+                    print(f"[BROWSER] Entering pincode {PINCODE}...")
+                    pin_input.fill(PINCODE)
+                    page.keyboard.press("Enter")
+                    page.wait_for_timeout(3000)
+                else:
+                    print("[BROWSER] No pincode input found, checking page as-is...")
+            except PlaywrightTimeout:
+                print("[BROWSER] Pincode input not found, proceeding...")
 
-        return {"in_stock": in_stock, "price": price, "error": f"Fallback used: {original_error}"}
-    except Exception as e:
-        return {"in_stock": False, "price": "N/A", "error": str(e)}
+            # Step 3: Read the page content
+            page_text = page.inner_text("body").lower()
+
+            # Step 4: Detect stock status
+            out_signals = [
+                "out of stock",
+                "notify me",
+                "currently unavailable",
+                "sold out",
+                "not available",
+            ]
+            in_stock_signals = [
+                "add to cart",
+                "buy now",
+                "add to bag",
+            ]
+
+            is_out = any(sig in page_text for sig in out_signals)
+            is_in  = any(sig in page_text for sig in in_stock_signals)
+            in_stock = is_in and not is_out
+
+            print(f"[BROWSER] Out-of-stock signals: {[s for s in out_signals if s in page_text]}")
+            print(f"[BROWSER] In-stock signals    : {[s for s in in_stock_signals if s in page_text]}")
+
+            # Step 5: Try to extract price
+            price = "check site"
+            price_match = re.search(r'₹\s*([\d,]+)', page.inner_text("body"))
+            if price_match:
+                price = f"₹{price_match.group(1)}"
+
+            browser.close()
+            return {"in_stock": in_stock, "price": price, "error": None}
+
+        except Exception as e:
+            browser.close()
+            return {"in_stock": False, "price": "N/A", "error": str(e)}
 
 
 def send_email(price: str):
-    """Send a nicely formatted HTML email via Gmail SMTP."""
+    """Send a formatted HTML email via Gmail SMTP."""
     subject = f"🛒 IN STOCK: {PRODUCT_NAME} – JioMart"
     checked_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
 
@@ -96,20 +105,17 @@ def send_email(price: str):
                   padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
         <h2 style="color: #1a73e8;">🛒 Product Back in Stock!</h2>
         <hr style="border: none; border-top: 1px solid #eee;">
-
         <p><strong>Product:</strong> {PRODUCT_NAME}</p>
         <p><strong>Price:</strong> <span style="color: #e53935; font-size: 1.2em;">{price}</span></p>
         <p><strong>Pincode:</strong> {PINCODE}</p>
         <p><strong>Checked at:</strong> {checked_at}</p>
-
         <a href="{PRODUCT_URL}" style="display: inline-block; margin-top: 20px;
            padding: 12px 24px; background: #1a73e8; color: white;
            text-decoration: none; border-radius: 6px; font-weight: bold;">
           Buy Now on JioMart →
         </a>
-
         <p style="margin-top: 30px; font-size: 0.8em; color: #999;">
-          This alert was sent by your JioMart Stock Notifier (GitHub Actions).
+          Sent by your JioMart Stock Notifier (GitHub Actions).
         </p>
       </div>
     </body></html>
@@ -133,7 +139,7 @@ def main():
     result = check_stock()
 
     if result["error"]:
-        print(f"[WARN] {result['error']}")
+        print(f"[ERROR] {result['error']}")
 
     status = "✅ IN STOCK" if result["in_stock"] else "❌ OUT OF STOCK"
     print(f"[INFO] Status: {status} | Price: {result['price']}")
