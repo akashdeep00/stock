@@ -1,1 +1,30 @@
+name: JioMart Stock Checker
 
+on:
+  schedule:
+    # Runs every 30 minutes (GitHub Actions minimum is 5 min, but 30 is polite)
+    - cron: "*/30 * * * *"
+  workflow_dispatch:   # Also allows manual trigger from GitHub UI
+
+jobs:
+  check-stock:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run stock checker
+        env:
+          GMAIL_SENDER:   ${{ secrets.GMAIL_SENDER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          NOTIFY_EMAIL:   ${{ secrets.NOTIFY_EMAIL }}
+        run: python check_stock.py
