@@ -1,14 +1,11 @@
 """
-JioMart Stock Notifier – ScraperAPI + JS Instruction Edition
-Uses ScraperAPI to interact with the page (type pincode, wait for response)
-before scraping the stock status.
+JioMart Stock Notifier – ScraperAPI Edition
 """
 
 import os
 import smtplib
 import re
 import requests
-import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -23,9 +20,18 @@ GMAIL_SENDER    = os.environ["GMAIL_SENDER"]
 GMAIL_PASSWORD  = os.environ["GMAIL_PASSWORD"]
 NOTIFY_EMAIL    = os.environ["NOTIFY_EMAIL"]
 SCRAPER_API_KEY = os.environ["SCRAPER_API_KEY"]
-
-SCRAPER_ENDPOINT = "https://api.scraperapi.com/structured/html"
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def fetch(url: str, render: bool = False) -> requests.Response:
+    params = {
+        "api_key":      SCRAPER_API_KEY,
+        "url":          url,
+        "country_code": "in",
+        "render":       "true" if render else "false",
+    }
+    resp = requests.get("https://api.scraperapi.com", params=params, timeout=120)
+    return resp
 
 
 def check_stock() -> dict:
@@ -34,112 +40,79 @@ def check_stock() -> dict:
         return {"in_stock": False, "price": "N/A", "error": "Cannot extract product ID"}
     pid = pid_match.group(1)
 
-    # ── Approach 1: ScraperAPI with JS instructions to enter pincode ──────────
-    # ScraperAPI supports structured instructions to interact with pages
-    print("[SCRAPER] Fetching page with pincode interaction...")
+    # ── Try 1: JSON API (no render needed, fast) ──────────────────────────────
+    api_url = f"https://www.jiomart.com/catalog/product/get_product_data/{pid}?pin={PINCODE}"
     try:
-        payload = {
-            "api_key":      SCRAPER_API_KEY,
-            "url":          PRODUCT_URL,
-            "country_code": "in",
-            "render":       True,
-            "instructions": [
-                # Wait for page to load
-                {"wait": 3000},
-                # Click the pincode field if it exists
-                {"click": "input[placeholder*='PIN'], input[placeholder*='pincode'], .pincode-input"},
-                {"wait": 500},
-                # Clear and type pincode
-                {"fill": ["input[placeholder*='PIN'], input[placeholder*='pincode'], .pincode-input", PINCODE]},
-                {"wait": 500},
-                {"press": ["input[placeholder*='PIN'], input[placeholder*='pincode'], .pincode-input", "Enter"]},
-                # Wait for availability to update
-                {"wait": 4000},
-            ]
-        }
-        resp = requests.post(
-            "https://api.scraperapi.com/",
-            json=payload,
-            timeout=120
-        )
-        print(f"[SCRAPER] Status: {resp.status_code} | Size: {len(resp.text)} bytes")
-
+        print(f"[API] Querying product {pid} pincode {PINCODE}...")
+        resp = fetch(api_url, render=False)
+        print(f"[API] Status: {resp.status_code} | Content-Type: {resp.headers.get('content-type', '?')}")
         if resp.status_code == 200:
-            result = _parse_html(resp.text)
-            if result is not None:
-                return result
+            try:
+                data = resp.json()
+                print(f"[API] Keys: {list(data.keys())}")
+                print(f"[API] Full response: {data}")
+                serviceable = data.get("pincode_serviceable", True) and data.get("serviceable", True)
+                in_stock = serviceable and (
+                    data.get("is_in_stock", False) or
+                    data.get("is_salable", False) or
+                    str(data.get("stock_status", "")).upper() == "IN_STOCK"
+                )
+                price = data.get("special_price") or data.get("price", "check site")
+                return {"in_stock": bool(in_stock), "price": f"₹{price}", "error": None}
+            except Exception as e:
+                print(f"[API] JSON parse error: {e} | Body: {resp.text[:300]}")
     except Exception as e:
-        print(f"[SCRAPER] Error: {e}")
+        print(f"[API] Request error: {e}")
 
-    # ── Approach 2: Simple GET with render (fallback) ─────────────────────────
-    print("[FALLBACK] Simple rendered GET...")
+    # ── Try 2: Rendered HTML (JS executed) ────────────────────────────────────
+    print("[HTML] Fetching rendered page...")
     try:
-        params = {
-            "api_key":      SCRAPER_API_KEY,
-            "url":          PRODUCT_URL,
-            "country_code": "in",
-            "render":       "true",
-        }
-        resp = requests.get("https://api.scraperapi.com/", params=params, timeout=120)
-        print(f"[FALLBACK] Status: {resp.status_code} | Size: {len(resp.text)} bytes")
-        if resp.status_code == 200:
-            result = _parse_html(resp.text)
-            if result is not None:
-                return result
+        resp = fetch(PRODUCT_URL, render=True)
+        print(f"[HTML] Status: {resp.status_code} | Size: {len(resp.text)} bytes")
+
+        if resp.status_code != 200:
+            return {"in_stock": False, "price": "N/A", "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+        clean = re.sub(r'<!--.*?-->', '', resp.text, flags=re.DOTALL)
+        lower = clean.lower()
+
+        for kw in ["unavailable at your location",
+                   "product not available at the selected pin",
+                   "add to cart", "buy now", "out of stock",
+                   "notify me", "is_in_stock", "is_salable"]:
+            idx = lower.find(kw)
+            if idx >= 0:
+                print(f"[HTML] FOUND '{kw}' → ...{clean[max(0,idx-60):idx+150]}...")
+            else:
+                print(f"[HTML] NOT FOUND: '{kw}'")
+
+        out_signals = [
+            "unavailable at your location",
+            "product not available at the selected pin",
+            "out of stock", "notify me",
+            "currently unavailable", "sold out", "not serviceable",
+        ]
+        in_signals = [
+            "add to cart", "buy now",
+            '"is_in_stock":true', '"is_salable":1',
+        ]
+
+        is_out = any(s in lower for s in out_signals)
+        is_in  = any(s in lower for s in in_signals)
+        in_stock = is_in and not is_out
+
+        print(f"[HTML] Out matched: {[s for s in out_signals if s in lower]}")
+        print(f"[HTML] In  matched: {[s for s in in_signals if s in lower]}")
+
+        price = "check site"
+        m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', resp.text)
+        if m:
+            price = f"₹{m.group(1)}"
+
+        return {"in_stock": in_stock, "price": price, "error": None}
+
     except Exception as e:
-        print(f"[FALLBACK] Error: {e}")
-
-    return {"in_stock": False, "price": "N/A", "error": "All methods failed"}
-
-
-def _parse_html(html: str) -> dict | None:
-    """Parse JioMart HTML to determine stock status."""
-
-    # Strip HTML comments
-    clean = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
-    lower = clean.lower()
-
-    # Debug all relevant keywords
-    for kw in [
-        "unavailable at your location",
-        "product not available at the selected pin",
-        "add to cart", "buy now",
-        "out of stock", "notify me",
-        "serviceable", "is_in_stock", "is_salable",
-    ]:
-        idx = lower.find(kw)
-        if idx >= 0:
-            print(f"[PARSE] FOUND '{kw}' → ...{clean[max(0,idx-60):idx+150]}...")
-        else:
-            print(f"[PARSE] NOT FOUND: '{kw}'")
-
-    out_signals = [
-        "unavailable at your location",
-        "product not available at the selected pin",
-        "out of stock", "notify me",
-        "currently unavailable", "sold out",
-        "not serviceable",
-    ]
-    in_signals = [
-        "add to cart", "buy now",
-        '"is_in_stock":true', '"is_salable":1',
-    ]
-
-    is_out = any(s in lower for s in out_signals)
-    is_in  = any(s in lower for s in in_signals)
-
-    print(f"[PARSE] Out matched: {[s for s in out_signals if s in lower]}")
-    print(f"[PARSE] In  matched: {[s for s in in_signals if s in lower]}")
-
-    # Out always wins
-    in_stock = is_in and not is_out
-
-    price = "check site"
-    m = re.search(r'"(?:special_price|price)"\s*:\s*"?([\d.]+)"?', html)
-    if m:
-        price = f"₹{m.group(1)}"
-
-    return {"in_stock": in_stock, "price": price, "error": None}
+        return {"in_stock": False, "price": "N/A", "error": str(e)}
 
 
 def send_email(price: str):
@@ -180,7 +153,7 @@ def main():
     print(f"[INFO] Current IST time: {now.strftime('%d %b %Y, %I:%M %p IST')}")
 
     if not (8 <= now.hour < 19):
-        print("[INFO] Outside 8 AM – 7 PM IST window. Skipping to save API credits.")
+        print("[INFO] Outside 8 AM – 7 PM IST. Skipping to save API credits.")
         return
 
     print(f"[INFO] Checking: '{PRODUCT_NAME}' | Pincode: {PINCODE}")
