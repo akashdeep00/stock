@@ -1,6 +1,6 @@
 name: JioMart Stock Checker
 
-on:
+"on":
   schedule:
     # Runs every 30 minutes (GitHub Actions minimum is 5 min, but 30 is polite)
     - cron: "*/30 * * * *"
